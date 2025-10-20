@@ -1,0 +1,4 @@
+*.srt
+*.mp4
+.clipper_tmp/
+__pycache__/
