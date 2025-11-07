@@ -14,6 +14,8 @@ import subprocess
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence
 
+from stt_providers import STTProviderError, get_stt_provider
+
 try:
     from yt_dlp import YoutubeDL
 except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
@@ -43,6 +45,10 @@ class Match:
 class DownloadResult:
     path: Path
     partial: bool
+
+
+class TranscriptUnavailableError(RuntimeError):
+    """Raised when subtitle data cannot be retrieved for the requested video."""
 
 
 def normalize(text: str) -> str:
@@ -156,7 +162,9 @@ def fetch_transcript_segments(url: str, lang: str) -> List[Segment]:
 
     json_files = sorted(tmpdir.glob("*.json3"), key=lambda path: path.stat().st_mtime, reverse=True)
     if not json_files:
-        raise RuntimeError("No subtitles were downloaded. Try a different language code or video.")
+        raise TranscriptUnavailableError(
+            "No subtitles were downloaded. Try a different language code or enable --auto-transcribe."
+        )
 
     latest = json_files[0]
     try:
@@ -274,6 +282,68 @@ def download_clip(
     attempt({}, outtmpl_override=full_outtmpl)
     full_path = Path(f"{full_base_template}.{target_ext}")
     return DownloadResult(path=full_path, partial=False)
+
+
+def download_audio_for_transcription(url: str, verbose: bool = False) -> Path:
+    tmpdir = Path.cwd() / ".clipper_tmp"
+    tmpdir.mkdir(exist_ok=True)
+    outtmpl = str(tmpdir / "%(id)s_transcribe.%(ext)s")
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "outtmpl": outtmpl,
+        "quiet": not verbose,
+        "no_warnings": not verbose,
+        "postprocessors": [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "wav",
+                "preferredquality": "192",
+            }
+        ],
+    }
+    status("Downloading audio track for transcription…")
+    with YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        downloaded = Path(ydl.prepare_filename(info))
+    # When FFmpegExtractAudio runs, the final output has .wav extension.
+    wav_path = downloaded.with_suffix(".wav")
+    return wav_path if wav_path.exists() else downloaded
+
+
+def transcribe_with_provider(
+    url: str, language: str, provider_name: str, verbose: bool = False
+) -> List[Segment]:
+    provider = get_stt_provider(provider_name)
+    if getattr(provider, "is_placeholder", False):
+        raise STTProviderError(
+            "The selected speech-to-text provider is a placeholder. "
+            "Implement a provider in 'stt_providers.py' or install one before using --auto-transcribe."
+        )
+    # TODO: Cache downloaded audio when multiple providers are chained to avoid redundant network usage.
+    audio_path = download_audio_for_transcription(url, verbose=verbose)
+    status(f"Transcribing audio via provider '{provider_name}'…")
+    try:
+        transcribed_segments = provider.transcribe(audio_path=audio_path, language=language)
+    finally:
+        try:
+            if audio_path.exists():
+                audio_path.unlink()
+        except OSError:
+            pass
+
+    segments: List[Segment] = []
+    for item in transcribed_segments:
+        text = getattr(item, "text", None)
+        start = getattr(item, "start", None)
+        end = getattr(item, "end", None)
+        if text is None or start is None or end is None:
+            continue
+        segments.append(Segment(text=text, start=float(start), end=float(end)))
+    if not segments:
+        raise STTProviderError(
+            f"Speech-to-text provider '{provider_name}' returned no usable segments."
+        )
+    return segments
 
 
 def write_subtitle_file(
@@ -438,6 +508,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Show yt-dlp output while downloading",
     )
+    parser.add_argument(
+        "--auto-transcribe",
+        action="store_true",
+        help="Automatically fall back to speech-to-text when subtitles are unavailable",
+    )
+    parser.add_argument(
+        "--stt-provider",
+        default="stub",
+        help="Speech-to-text provider plugin name to use with --auto-transcribe",
+    )
     return parser.parse_args(argv)
 
 
@@ -452,6 +532,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         status("Fetching transcript…")
         segments = fetch_transcript_segments(args.url, args.lang)
+    except TranscriptUnavailableError as exc:
+        if not args.auto_transcribe:
+            print(f"Failed to download transcript: {exc}", file=sys.stderr)
+            return 1
+        status("No subtitles available; attempting speech-to-text fallback…")
+        try:
+            segments = transcribe_with_provider(
+                url=args.url,
+                language=args.lang,
+                provider_name=args.stt_provider,
+                verbose=args.verbose,
+            )
+        except STTProviderError as stt_exc:
+            print(f"Speech-to-text provider error: {stt_exc}", file=sys.stderr)
+            return 1
+        except Exception as stt_exc:
+            print(f"Failed to transcribe audio: {stt_exc}", file=sys.stderr)
+            return 1
     except Exception as exc:
         print(f"Failed to download transcript: {exc}", file=sys.stderr)
         return 1
