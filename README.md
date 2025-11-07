@@ -54,6 +54,18 @@ The script uses `yt-dlp`'s `--download-sections "*start-end"` support to grab ju
 
 If no good match is found the script exits with a nonzero status. Try adjusting your query (shorter phrases often match better) or confirm that the video has subtitles in the selected language.
 
+## GUI frontend
+
+Prefer not to use the terminal? Launch the Tkinter-based helper to collect options, preview the exact command that will run, and stream `clipper.py` output in a scrollable panel:
+
+```bash
+python clipper_gui.py
+```
+
+Fill in the video URL and query text (both required), adjust how many seconds before/after the quote you want, pick a subtitle language and quality preset from the dropdowns, optionally choose an output path, then click **Run clipper**. The GUI constructs the equivalent CLI command (with verbose logging enabled), runs it on your behalf, and surfaces progress and errors inline so non-technical users can follow along.
+
+At launch the GUI offers to install or update `yt-dlp` via `pip install --upgrade yt-dlp`, since staying on the latest release is critical for bypassing YouTube site changes. Accepting the prompt is especially helpful for Windows users who might not update the dependency manually.
+
 ## Speech-to-text fallback
 
 **==EXPERIMENTAL, HERE BE DRAGONS!==**
