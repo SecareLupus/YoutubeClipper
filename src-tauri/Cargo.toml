@@ -1,20 +1,25 @@
 [package]
-name = "schnitt"
+name = "better-clipper"
 version = "0.1.0"
 description = "Video Snippet Clipper"
 authors = ["you"]
 edition = "2021"
 
 [lib]
-name = "schnitt_lib"
+name = "better_clipper_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-shell = "2"
 tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+reqwest = { version = "0.12", features = ["stream"] }
+tokio = { version = "1", features = ["process", "io-util", "fs"] }
+tempfile = "3"
+futures-util = "0.3"

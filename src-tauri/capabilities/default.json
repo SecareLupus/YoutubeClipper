@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "Default capabilities for Schnitt",
+  "description": "Default capabilities for BetterClipper",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -9,6 +9,7 @@
     "shell:allow-stdin-write",
     "shell:allow-kill",
     "shell:default",
+    "dialog:default",
     "fs:allow-read",
     "fs:allow-write",
     "fs:allow-exists",
@@ -19,7 +20,7 @@
         { "path": "$TEMP/**" },
         { "path": "$CACHE/**" },
         { "path": "$APPDATA/**" },
-        { "path": "$HOME/.cache/schnitt/**" }
+        { "path": "$HOME/.cache/better-clipper/**" }
       ]
     }
   ]

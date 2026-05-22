@@ -1,5 +1,5 @@
 {
-  "name": "schnitt",
+  "name": "better-clipper",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -13,6 +13,7 @@
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-shell": "^2.0.0",
     "@tauri-apps/plugin-fs": "^2.0.0",
+    "@tauri-apps/plugin-dialog": "^2.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
