@@ -166,7 +166,6 @@ function App() {
   const [downloadingSection, setDownloadingSection] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
-  const [exportPath, setExportPath] = useState<string | null>(null);
   const [quality, setQuality] = useState("1080p");
   const [originalStartMs, setOriginalStartMs] = useState(0);
   const [originalEndMs, setOriginalEndMs] = useState(0);
@@ -368,23 +367,38 @@ function App() {
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [hasVideo]);
 
-  // ── preview clip: frame-accurate auto-pause at Out marker ─────────────────
+  // ── preview clip: seek-to-Out, wait for buffer flush, pause ──────────────
   useEffect(() => {
     if (!previewing || !videoRef.current) return;
     const video = videoRef.current;
-    let id: number;
 
+    const onEnded = () => {
+      video.pause();
+      setPreviewing(false);
+    };
+    video.addEventListener("ended", onEnded);
+
+    let id: number;
     const checkFrame = () => {
       if (video.currentTime >= outMarker) {
-        video.pause();
-        setPreviewing(false);
+        // Seek to Out marker — flushes audio decode buffer
+        video.currentTime = outMarker;
+        const onSeeked = () => {
+          video.pause();
+          video.removeEventListener("seeked", onSeeked);
+          setPreviewing(false);
+        };
+        video.addEventListener("seeked", onSeeked);
         return;
       }
       id = requestAnimationFrame(checkFrame);
     };
-
     id = requestAnimationFrame(checkFrame);
-    return () => cancelAnimationFrame(id);
+
+    return () => {
+      cancelAnimationFrame(id);
+      video.removeEventListener("ended", onEnded);
+    };
   }, [previewing, outMarker]);
 
   // ── process video ───────────────────────────────────────────────────────
@@ -500,7 +514,6 @@ function App() {
 
     setExporting(true);
     setExportProgress(0);
-    setExportPath(null);
     setStatusMsg("Exporting clip...");
 
     try {
@@ -514,7 +527,6 @@ function App() {
         resolution: quality,
         outputPath: outPath,
       })) as string;
-      setExportPath(path);
       setStatusMsg(`Exported: ${path}`);
     } catch (e) {
       setExporting(false);
@@ -883,12 +895,7 @@ function App() {
               )}
               {hasVideo && (
                 <div className="video-controls">
-                  {exportPath ? (
-                    <div className="export-result">
-                      <span className="export-done">Exported</span>
-                      <code className="path">{exportPath}</code>
-                    </div>
-                  ) : exporting ? (
+                  {exporting ? (
                     <div className="export-progress-inline">
                       <span>Encoding...</span>
                       <div className="progress-bar-track small">

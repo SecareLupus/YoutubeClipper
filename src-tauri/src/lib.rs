@@ -513,7 +513,7 @@ async fn export_slice(
     .map_err(|e| format!("Download failed: {}", e))?;
 
     // Step 2: re-encode with ffmpeg
-    let duration = end_sec - start_sec;
+    let duration = end_sec - start_sec + 1.0 / 30.0;
     let final_path = if output_path.is_empty() {
         let exports_dir = app
             .path()
@@ -552,7 +552,7 @@ async fn export_slice(
             "-ss",
             &format!("{:.3}", start_sec),
             "-to",
-            &format!("{:.3}", end_sec),
+            &format!("{:.3}", end_sec + 1.0 / 30.0),
             "-c:v",
             "libx264",
             "-preset",
