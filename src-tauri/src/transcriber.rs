@@ -20,7 +20,7 @@ pub struct Transcriber;
 impl Transcriber {
     /// Extract 16kHz mono WAV from a video file using ffmpeg.
     pub async fn extract_audio(app: &AppHandle, video_path: &str, output_wav: &str) -> Result<(), String> {
-        let ffmpeg = resolve_sidecar("ffmpeg");
+        let ffmpeg = resolve_sidecar(app, "ffmpeg");
 
         let output = app
             .shell()
@@ -131,7 +131,7 @@ impl Transcriber {
         wav_path: &str,
         output_prefix: &str,
     ) -> Result<String, String> {
-        let whisper = resolve_sidecar("whisper-cli");
+        let whisper = resolve_sidecar(app, "whisper-cli");
 
         let output = app
             .shell()

@@ -25,7 +25,7 @@ impl Downloader {
         video_id: &str,
         url: &str,
     ) -> Result<Option<String>, String> {
-        let ytdlp = resolve_sidecar("yt-dlp");
+        let ytdlp = resolve_sidecar(app, "yt-dlp");
         let output_template = format!("{}/{}.%(ext)s", output_dir, video_id);
 
         let _ = app.emit(
@@ -130,7 +130,7 @@ impl Downloader {
         pad_seconds: u64,
         resolution: &str,
     ) -> Result<String, String> {
-        let ytdlp = resolve_sidecar("yt-dlp");
+        let ytdlp = resolve_sidecar(app, "yt-dlp");
         let pad_ms = pad_seconds * 1000;
         let section_start = ms_to_ytdlp_time(start_ms.saturating_sub(pad_ms));
         let section_end = ms_to_ytdlp_time(end_ms + pad_ms);
@@ -243,7 +243,7 @@ impl Downloader {
         resolution: &str,
         url: &str,
     ) -> Result<String, String> {
-        let ytdlp = resolve_sidecar("yt-dlp");
+        let ytdlp = resolve_sidecar(app, "yt-dlp");
 
         let format_flag = match resolution {
             "4k" => "bestvideo[height<=2160][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=2160]+bestaudio/best[height<=2160]",

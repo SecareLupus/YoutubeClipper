@@ -77,7 +77,7 @@ async fn process_video(
     .map_err(|e| format!("Transcript fetch failed: {}", e))?;
 
     // Fetch video title for export filename suggestions
-    let title = fetch_video_title(&url).await;
+    let title = fetch_video_title(&app, &url).await;
 
     if let Some(vtt_path) = yt_vtt {
         let dest_vtt = transcripts_dir.join(format!("{}.vtt", video_id));
@@ -568,7 +568,7 @@ async fn export_slice(
         output_path
     };
 
-    let ffmpeg = sidecar::resolve_sidecar("ffmpeg");
+    let ffmpeg = sidecar::resolve_sidecar(&app, "ffmpeg");
 
     let _ = app.emit(
         "export-progress",
@@ -676,6 +676,7 @@ fn parse_hhmmss(s: &str) -> Option<f64> {
 
 #[tauri::command]
 async fn preview_clip(
+    app: tauri::AppHandle,
     section_path: String,
     start_sec: f64,
     end_sec: f64,
@@ -696,7 +697,7 @@ async fn preview_clip(
         return serve_video(preview_path);
     }
 
-    let ffmpeg = sidecar::resolve_sidecar("ffmpeg");
+    let ffmpeg = sidecar::resolve_sidecar(&app, "ffmpeg");
 
     // -ss after -i: frame-accurate seek (decodes from start, discards before -ss).
     // Re-encode (not -c copy) because the downloaded section has sparse keyframes
@@ -814,8 +815,8 @@ fn serve_video(path: String) -> Result<String, String> {
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
-async fn fetch_video_title(url: &str) -> String {
-    let ytdlp = sidecar::resolve_sidecar("yt-dlp");
+async fn fetch_video_title(app: &tauri::AppHandle, url: &str) -> String {
+    let ytdlp = sidecar::resolve_sidecar(app, "yt-dlp");
     match tokio::process::Command::new(&ytdlp)
         .args(["--print", "title", "--no-playlist", url])
         .output()
