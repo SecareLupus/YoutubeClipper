@@ -8,6 +8,8 @@ use tauri::Manager;
 /// In dev builds: returns the binary name directly (relies on PATH).
 /// In production: resolves relative to the app's resource directory
 /// where Tauri's `bundle.resources` places the binaries/ files.
+/// Tries the plain name first, then falls back to `name-{target-triple}`
+/// for compatibility with externalBin naming conventions.
 pub fn resolve_sidecar(app: &AppHandle, name: &str) -> String {
     #[cfg(debug_assertions)]
     {
@@ -17,14 +19,21 @@ pub fn resolve_sidecar(app: &AppHandle, name: &str) -> String {
 
     #[cfg(not(debug_assertions))]
     {
-        // Sidecars are bundled as resources, not externalBin — they live
-        // in the resource directory (e.g. /usr/lib/better-clipper/ for deb,
-        // or inside the AppDir for AppImage). No conflicts with system packages.
-        app.path()
-            .resource_dir()
-            .unwrap_or_default()
-            .join(name)
-            .to_string_lossy()
-            .to_string()
+        let resource_dir = app.path().resource_dir().unwrap_or_default();
+
+        // Try plain name first
+        let plain = resource_dir.join(name);
+        if plain.exists() {
+            return plain.to_string_lossy().to_string();
+        }
+
+        // Fall back to name-target-triple (externalBin legacy)
+        let triple = resource_dir.join(format!("{}-{}", name, env!("TAURI_ENV_TARGET_TRIPLE")));
+        if triple.exists() {
+            return triple.to_string_lossy().to_string();
+        }
+
+        // Return plain path anyway — caller will get a clearer "command not found" error
+        plain.to_string_lossy().to_string()
     }
 }

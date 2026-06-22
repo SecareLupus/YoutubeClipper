@@ -85,21 +85,21 @@ jobs:
 
           # yt-dlp (statically-linked Linux binary)
           curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp" \
-            -o "$SIDECAR_DIR/yt-dlp-${{ matrix.target }}"
-          chmod +x "$SIDECAR_DIR/yt-dlp-${{ matrix.target }}"
+            -o "$SIDECAR_DIR/yt-dlp"
+          chmod +x "$SIDECAR_DIR/yt-dlp"
 
           # ffmpeg (static build from BtbN/FFmpeg-Builds)
           curl -fsSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz" \
             -o ffmpeg.tar.xz
           tar -xf ffmpeg.tar.xz
-          mv ffmpeg-master-latest-linux64-gpl/bin/ffmpeg "$SIDECAR_DIR/ffmpeg-${{ matrix.target }}"
-          chmod +x "$SIDECAR_DIR/ffmpeg-${{ matrix.target }}"
+          mv ffmpeg-master-latest-linux64-gpl/bin/ffmpeg "$SIDECAR_DIR/ffmpeg"
+          chmod +x "$SIDECAR_DIR/ffmpeg"
 
           # whisper-cli (build from source — fast, ~30s)
           git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git whisper-src
           cmake -B whisper-src/build -DCMAKE_BUILD_TYPE=Release -S whisper-src
           cmake --build whisper-src/build --config Release -j
-          cp whisper-src/build/bin/whisper-cli "$SIDECAR_DIR/whisper-cli-${{ matrix.target }}"
+          cp whisper-src/build/bin/whisper-cli "$SIDECAR_DIR/whisper-cli"
 
           ls -lh "$SIDECAR_DIR/"
 
@@ -112,21 +112,21 @@ jobs:
 
           # yt-dlp.exe
           Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" `
-            -OutFile "$dir/yt-dlp-${{ matrix.target }}${{ matrix.ext }}"
+            -OutFile "$dir/yt-dlp.exe"
 
           # ffmpeg.exe (essentials build from gyan.dev)
           Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" `
             -OutFile ffmpeg.zip
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-tmp
           Copy-Item (Get-ChildItem ffmpeg-tmp/ffmpeg-*/bin/ffmpeg.exe).FullName `
-            "$dir/ffmpeg-${{ matrix.target }}${{ matrix.ext }}"
+            "$dir/ffmpeg.exe"
 
           # whisper-cli.exe (build from source)
           git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git whisper-src
           cmake -B whisper-src/build -DCMAKE_BUILD_TYPE=Release -S whisper-src
           cmake --build whisper-src/build --config Release -j
           Copy-Item whisper-src/build/bin/Release/whisper-cli.exe `
-            "$dir/whisper-cli-${{ matrix.target }}${{ matrix.ext }}"
+            "$dir/whisper-cli.exe"
 
           Get-ChildItem $dir
 
@@ -137,20 +137,20 @@ jobs:
 
           # yt-dlp
           curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos" \
-            -o "$SIDECAR_DIR/yt-dlp-${{ matrix.target }}"
-          chmod +x "$SIDECAR_DIR/yt-dlp-${{ matrix.target }}"
+            -o "$SIDECAR_DIR/yt-dlp"
+          chmod +x "$SIDECAR_DIR/yt-dlp"
 
           # ffmpeg (static build from evermeet)
           curl -fsSL "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip" -o ffmpeg.zip
           unzip -o ffmpeg.zip -d ffmpeg-tmp
-          mv ffmpeg-tmp/ffmpeg "$SIDECAR_DIR/ffmpeg-${{ matrix.target }}"
-          chmod +x "$SIDECAR_DIR/ffmpeg-${{ matrix.target }}"
+          mv ffmpeg-tmp/ffmpeg "$SIDECAR_DIR/ffmpeg"
+          chmod +x "$SIDECAR_DIR/ffmpeg"
 
           # whisper-cli (build from source)
           git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git whisper-src
           cmake -B whisper-src/build -DCMAKE_BUILD_TYPE=Release -S whisper-src
           cmake --build whisper-src/build --config Release -j
-          cp whisper-src/build/bin/whisper-cli "$SIDECAR_DIR/whisper-cli-${{ matrix.target }}"
+          cp whisper-src/build/bin/whisper-cli "$SIDECAR_DIR/whisper-cli"
 
           ls -lh "$SIDECAR_DIR/"
 
