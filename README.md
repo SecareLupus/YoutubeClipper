@@ -121,6 +121,24 @@ Builds and runs. Core workflow complete:
 - [x] Video title detection for export filename suggestions
 - [x] Section downloads keyed by time range — re-selecting a segment downloads afresh
 
+## Releases
+
+Pre-built packages are available on the [Releases page](https://github.com/SecareLupus/YoutubeClipper/releases). To create a new release, run the **Release** workflow from the Actions tab with a version number — it tags, builds all platforms, and publishes the artifacts.
+
+### Linux compatibility
+
+| Package | Works on |
+|---|---|
+| `.deb` | Ubuntu 24.04+, Debian 13+, Linux Mint 22+, Pop!_OS 24.04+ |
+| `.rpm` | Fedora 39+, openSUSE Tumbleweed |
+| `.AppImage` | Any Linux (self-contained, no system deps needed) |
+
+Ubuntu 22.04, Debian 12, and RHEL 9 are **not** supported by the `.deb`/`.rpm` — they ship `libwebkit2gtk-4.0` (Tauri v2 requires the 4.1 API). Use the `.AppImage` on those systems.
+
+### Windows / macOS
+
+Windows (`.msi`, `.exe` NSIS) and macOS (`.dmg`) packages are built from CI but not yet tested. Sidecar binaries (`yt-dlp`, `ffmpeg`, `whisper-cli`) are downloaded during the CI build for each platform.
+
 ## License
 
 MIT

@@ -1,0 +1,171 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (e.g. 0.2.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  # ── tag ──────────────────────────────────────────────────────────────────
+
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create and push tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${{ inputs.version }}" -m "Release v${{ inputs.version }}"
+          git push origin "v${{ inputs.version }}"
+
+  # ── build matrix ─────────────────────────────────────────────────────────
+
+  build:
+    needs: tag
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: ''
+            bundles: deb,appimage,rpm
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: .exe
+            bundles: msi,nsis
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            ext: ''
+            bundles: dmg
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: "v${{ inputs.version }}"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      # ── Bump version ──────────────────────────────────────────────────
+      - name: Set version in tauri.conf.json
+        run: |
+          jq ".version = \"${{ inputs.version }}\"" \
+            src-tauri/tauri.conf.json > tmp.json && mv tmp.json src-tauri/tauri.conf.json
+
+      # ── Platform sidecars ─────────────────────────────────────────────
+      - name: Verify sidecars (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          chmod +x src-tauri/binaries/*
+          ls -lh src-tauri/binaries/
+
+      - name: Download sidecars (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $dir = "src-tauri/binaries"
+          New-Item -ItemType Directory -Force -Path $dir
+
+          # yt-dlp.exe
+          Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" `
+            -OutFile "$dir/yt-dlp-${{ matrix.target }}${{ matrix.ext }}"
+
+          # ffmpeg.exe (essentials build)
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" `
+            -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-tmp
+          Copy-Item (Get-ChildItem ffmpeg-tmp/ffmpeg-*/bin/ffmpeg.exe).FullName `
+            "$dir/ffmpeg-${{ matrix.target }}${{ matrix.ext }}"
+
+          # whisper-cli.exe (lightweight build from source)
+          git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git whisper-src
+          cd whisper-src
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release -j
+          Copy-Item build/bin/Release/whisper-cli.exe `
+            "../$dir/whisper-cli-${{ matrix.target }}${{ matrix.ext }}"
+
+          Get-ChildItem $dir
+
+      - name: Download sidecars (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          mkdir -p src-tauri/binaries
+
+          # yt-dlp
+          curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos" \
+            -o "src-tauri/binaries/yt-dlp-${{ matrix.target }}"
+          chmod +x "src-tauri/binaries/yt-dlp-${{ matrix.target }}"
+
+          # ffmpeg (static build)
+          curl -fsSL "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip" -o ffmpeg.zip
+          unzip -o ffmpeg.zip -d ffmpeg-tmp
+          mv ffmpeg-tmp/ffmpeg "src-tauri/binaries/ffmpeg-${{ matrix.target }}"
+          chmod +x "src-tauri/binaries/ffmpeg-${{ matrix.target }}"
+
+          # whisper-cli (build from source)
+          git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git whisper-src
+          cd whisper-src
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release -j
+          cp build/bin/whisper-cli "../src-tauri/binaries/whisper-cli-${{ matrix.target }}"
+
+          ls -lh src-tauri/binaries/
+
+      # ── Build + release ───────────────────────────────────────────────
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux system deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev \
+            librsvg2-dev patchelf libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
+
+      - name: Build and release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+          tagName: v${{ inputs.version }}
+          releaseName: 'BetterClipper v${{ inputs.version }}'
+          releaseBody: |
+            ## BetterClipper v${{ inputs.version }}
+
+            ### Linux
+            - `BetterClipper_${{ inputs.version }}_amd64.deb` — Ubuntu 24.04+, Debian 13+
+            - `BetterClipper_${{ inputs.version }}_amd64.AppImage` — any Linux (self-contained)
+            - `BetterClipper-${{ inputs.version }}-1.x86_64.rpm` — Fedora 39+, openSUSE Tumbleweed
+
+            ### Windows
+            - `.msi` installer
+            - `.exe` installer (NSIS)
+
+            ### macOS
+            - `.dmg` disk image
+
+            Requires `yt-dlp`, `ffmpeg`, and `whisper-cli` — bundled in the AppImage, included as sidecars on Windows/macOS.
+          releaseDraft: false
+          prerelease: false
