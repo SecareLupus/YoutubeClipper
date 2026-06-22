@@ -11,6 +11,9 @@ on:
 permissions:
   contents: write
 
+env:
+  SIDECAR_DIR: src-tauri/binaries
+
 jobs:
   # ── tag ──────────────────────────────────────────────────────────────────
 
@@ -65,69 +68,87 @@ jobs:
 
       # ── Bump version ──────────────────────────────────────────────────
       - name: Set version in tauri.conf.json
+        shell: bash
         run: |
           jq ".version = \"${{ inputs.version }}\"" \
             src-tauri/tauri.conf.json > tmp.json && mv tmp.json src-tauri/tauri.conf.json
 
       # ── Platform sidecars ─────────────────────────────────────────────
-      - name: Verify sidecars (Linux)
+      - name: Download sidecars (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          chmod +x src-tauri/binaries/*
-          ls -lh src-tauri/binaries/
+          mkdir -p "$SIDECAR_DIR"
+
+          # yt-dlp (statically-linked Linux binary)
+          curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp" \
+            -o "$SIDECAR_DIR/yt-dlp-${{ matrix.target }}"
+          chmod +x "$SIDECAR_DIR/yt-dlp-${{ matrix.target }}"
+
+          # ffmpeg (static build from johnvansickle.com)
+          curl -fsSL "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz" \
+            -o ffmpeg.tar.xz
+          tar -xf ffmpeg.tar.xz
+          mv ffmpeg-*-amd64-static/ffmpeg "$SIDECAR_DIR/ffmpeg-${{ matrix.target }}"
+          chmod +x "$SIDECAR_DIR/ffmpeg-${{ matrix.target }}"
+
+          # whisper-cli (build from source — fast, ~30s)
+          git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git whisper-src
+          cmake -B whisper-src/build -DCMAKE_BUILD_TYPE=Release -S whisper-src
+          cmake --build whisper-src/build --config Release -j
+          cp whisper-src/build/bin/whisper-cli "$SIDECAR_DIR/whisper-cli-${{ matrix.target }}"
+
+          ls -lh "$SIDECAR_DIR/"
 
       - name: Download sidecars (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          $dir = "src-tauri/binaries"
+          $dir = "$env:SIDECAR_DIR"
           New-Item -ItemType Directory -Force -Path $dir
 
           # yt-dlp.exe
           Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" `
             -OutFile "$dir/yt-dlp-${{ matrix.target }}${{ matrix.ext }}"
 
-          # ffmpeg.exe (essentials build)
+          # ffmpeg.exe (essentials build from gyan.dev)
           Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" `
             -OutFile ffmpeg.zip
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-tmp
           Copy-Item (Get-ChildItem ffmpeg-tmp/ffmpeg-*/bin/ffmpeg.exe).FullName `
             "$dir/ffmpeg-${{ matrix.target }}${{ matrix.ext }}"
 
-          # whisper-cli.exe (lightweight build from source)
+          # whisper-cli.exe (build from source)
           git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git whisper-src
-          cd whisper-src
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --config Release -j
-          Copy-Item build/bin/Release/whisper-cli.exe `
-            "../$dir/whisper-cli-${{ matrix.target }}${{ matrix.ext }}"
+          cmake -B whisper-src/build -DCMAKE_BUILD_TYPE=Release -S whisper-src
+          cmake --build whisper-src/build --config Release -j
+          Copy-Item whisper-src/build/bin/Release/whisper-cli.exe `
+            "$dir/whisper-cli-${{ matrix.target }}${{ matrix.ext }}"
 
           Get-ChildItem $dir
 
       - name: Download sidecars (macOS)
         if: matrix.os == 'macos-latest'
         run: |
-          mkdir -p src-tauri/binaries
+          mkdir -p "$SIDECAR_DIR"
 
           # yt-dlp
           curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos" \
-            -o "src-tauri/binaries/yt-dlp-${{ matrix.target }}"
-          chmod +x "src-tauri/binaries/yt-dlp-${{ matrix.target }}"
+            -o "$SIDECAR_DIR/yt-dlp-${{ matrix.target }}"
+          chmod +x "$SIDECAR_DIR/yt-dlp-${{ matrix.target }}"
 
-          # ffmpeg (static build)
+          # ffmpeg (static build from evermeet)
           curl -fsSL "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip" -o ffmpeg.zip
           unzip -o ffmpeg.zip -d ffmpeg-tmp
-          mv ffmpeg-tmp/ffmpeg "src-tauri/binaries/ffmpeg-${{ matrix.target }}"
-          chmod +x "src-tauri/binaries/ffmpeg-${{ matrix.target }}"
+          mv ffmpeg-tmp/ffmpeg "$SIDECAR_DIR/ffmpeg-${{ matrix.target }}"
+          chmod +x "$SIDECAR_DIR/ffmpeg-${{ matrix.target }}"
 
           # whisper-cli (build from source)
           git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git whisper-src
-          cd whisper-src
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --config Release -j
-          cp build/bin/whisper-cli "../src-tauri/binaries/whisper-cli-${{ matrix.target }}"
+          cmake -B whisper-src/build -DCMAKE_BUILD_TYPE=Release -S whisper-src
+          cmake --build whisper-src/build --config Release -j
+          cp whisper-src/build/bin/whisper-cli "$SIDECAR_DIR/whisper-cli-${{ matrix.target }}"
 
-          ls -lh src-tauri/binaries/
+          ls -lh "$SIDECAR_DIR/"
 
       # ── Build + release ───────────────────────────────────────────────
       - name: Install Rust
