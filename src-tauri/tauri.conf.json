@@ -37,10 +37,8 @@
       "icons/icon.ico",
       "icons/icon.icns"
     ],
-    "externalBin": [
-      "binaries/yt-dlp",
-      "binaries/ffmpeg",
-      "binaries/whisper-cli"
+    "resources": [
+      "binaries/*"
     ],
     "linux": {
       "deb": {

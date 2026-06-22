@@ -6,8 +6,8 @@ use tauri::Manager;
 /// Resolve a sidecar binary path.
 ///
 /// In dev builds: returns the binary name directly (relies on PATH).
-/// In production: resolves relative to the executable's directory
-/// where Tauri's bundler places `externalBin` files alongside the app binary.
+/// In production: resolves relative to the app's resource directory
+/// where Tauri's `bundle.resources` places the binaries/ files.
 pub fn resolve_sidecar(app: &AppHandle, name: &str) -> String {
     #[cfg(debug_assertions)]
     {
@@ -17,13 +17,14 @@ pub fn resolve_sidecar(app: &AppHandle, name: &str) -> String {
 
     #[cfg(not(debug_assertions))]
     {
-        // In packaged builds, externalBin sidecars live next to the executable.
-        // Fall back to resource_dir if the exe path can't be determined.
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            .unwrap_or_else(|| app.path().resource_dir().unwrap_or_default());
-
-        exe_dir.join(name).to_string_lossy().to_string()
+        // Sidecars are bundled as resources, not externalBin — they live
+        // in the resource directory (e.g. /usr/lib/better-clipper/ for deb,
+        // or inside the AppDir for AppImage). No conflicts with system packages.
+        app.path()
+            .resource_dir()
+            .unwrap_or_default()
+            .join(name)
+            .to_string_lossy()
+            .to_string()
     }
 }
