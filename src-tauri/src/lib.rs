@@ -837,12 +837,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
-        .setup(|app| {
-            let resource_dir = app.path().resource_dir()?;
-            let binaries_dir = resource_dir.join("binaries");
-            let models_dir = resource_dir.join("models");
-            std::fs::create_dir_all(&binaries_dir)?;
-            std::fs::create_dir_all(&models_dir)?;
+        .setup(|_app| {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
