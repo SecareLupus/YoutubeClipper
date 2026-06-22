@@ -169,7 +169,10 @@ function App() {
   const [quality, setQuality] = useState("1080p");
   const [originalStartMs, setOriginalStartMs] = useState(0);
   const [originalEndMs, setOriginalEndMs] = useState(0);
-  const [previewing, setPreviewing] = useState(false);
+  const [previewVideoSrc, setPreviewVideoSrc] = useState<string | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [generatingPreview, setGeneratingPreview] = useState(false);
+  const previewVideoRef = useRef<HTMLVideoElement>(null);
 
   // ── video / timeline state ──────────────────────────────────────────────
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -182,6 +185,7 @@ function App() {
   const [outMarker, setOutMarker] = useState(0); // seconds (video-local)
   const [zoomMin, setZoomMin] = useState(0); // seconds
   const [zoomMax, setZoomMax] = useState(30); // seconds
+  const [timelineWidth, setTimelineWidth] = useState(0); // px — measured after mount
 
   // Refs for keyboard handler (avoids stale closures)
   const inMarkerRef = useRef(inMarker);
@@ -277,6 +281,20 @@ function App() {
   const showTimeline = sectionPath && duration > 0;
   const hasVideo = sectionPath && duration > 0;
 
+  // ── measure timeline width after mount / resize ────────────────────────
+  useEffect(() => {
+    const el = timelineRef.current;
+    if (!el) {
+      setTimelineWidth(0);
+      return;
+    }
+    const measure = () => setTimelineWidth(el.getBoundingClientRect().width);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [showTimeline]);
+
   // ── keyboard shortcuts ───────────────────────────────────────────────────
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -305,7 +323,6 @@ function App() {
       switch (e.key) {
         case " ":
           e.preventDefault();
-          setPreviewing(false);
           if (video.paused) {
             video.play();
           } else {
@@ -314,12 +331,10 @@ function App() {
           break;
         case ",":
           e.preventDefault();
-          setPreviewing(false);
           video.currentTime = Math.max(0, video.currentTime - FRAME);
           break;
         case ".":
           e.preventDefault();
-          setPreviewing(false);
           video.currentTime = Math.min(
             video.duration || Infinity,
             video.currentTime + FRAME,
@@ -327,7 +342,6 @@ function App() {
           break;
         case "ArrowLeft":
           e.preventDefault();
-          setPreviewing(false);
           if (e.ctrlKey) {
             const kps = getKeypoints();
             const prev = kps.filter((k) => k < video.currentTime - 0.01).pop();
@@ -338,7 +352,6 @@ function App() {
           break;
         case "ArrowRight":
           e.preventDefault();
-          setPreviewing(false);
           if (e.ctrlKey) {
             const kps = getKeypoints();
             const next = kps.find((k) => k > video.currentTime + 0.01);
@@ -367,39 +380,56 @@ function App() {
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [hasVideo]);
 
-  // ── preview clip: seek-to-Out, wait for buffer flush, pause ──────────────
+  // ── preview clip: cut section with ffmpeg, play in modal ───────────────
+  const handlePreviewClip = async () => {
+    if (!sectionPath || generatingPreview) return;
+    setGeneratingPreview(true);
+    setPreviewOpen(true);
+    setStatusMsg("Generating preview...");
+
+    try {
+      const url = (await invoke("preview_clip", {
+        sectionPath,
+        startSec: inMarker,
+        endSec: outMarker,
+      })) as string;
+      console.log("[preview] preview_clip URL", url);
+      setPreviewVideoSrc(url);
+      setStatusMsg("Preview ready");
+    } catch (e) {
+      setStatusMsg(`Preview failed: ${e}`);
+      setPreviewOpen(false);
+    } finally {
+      setGeneratingPreview(false);
+    }
+  };
+
+  const closePreview = useCallback(() => {
+    setPreviewOpen(false);
+    setPreviewVideoSrc(null);
+  }, []);
+
+  // ── autoplay preview once source is loaded ─────────────────────────────
   useEffect(() => {
-    if (!previewing || !videoRef.current) return;
-    const video = videoRef.current;
+    const vid = previewVideoRef.current;
+    if (!vid || !previewVideoSrc) return;
 
-    const onEnded = () => {
-      video.pause();
-      setPreviewing(false);
+    const play = () => {
+      vid.currentTime = 0;
+      vid.play().catch(() => {}); // ignore if browser blocks
     };
-    video.addEventListener("ended", onEnded);
 
-    let id: number;
-    const checkFrame = () => {
-      if (video.currentTime >= outMarker) {
-        // Seek to Out marker — flushes audio decode buffer
-        video.currentTime = outMarker;
-        const onSeeked = () => {
-          video.pause();
-          video.removeEventListener("seeked", onSeeked);
-          setPreviewing(false);
-        };
-        video.addEventListener("seeked", onSeeked);
-        return;
-      }
-      id = requestAnimationFrame(checkFrame);
-    };
-    id = requestAnimationFrame(checkFrame);
+    // If already have enough data, play immediately
+    if (vid.readyState >= 2) {
+      play();
+    } else {
+      vid.addEventListener("loadeddata", play, { once: true });
+    }
 
     return () => {
-      cancelAnimationFrame(id);
-      video.removeEventListener("ended", onEnded);
+      vid.removeEventListener("loadeddata", play);
     };
-  }, [previewing, outMarker]);
+  }, [previewVideoSrc]);
 
   // ── process video ───────────────────────────────────────────────────────
   const handleProcess = async () => {
@@ -485,15 +515,6 @@ function App() {
     }
   };
 
-  // ── preview clip ──────────────────────────────────────────────────────────
-  const handlePreviewClip = () => {
-    const video = videoRef.current;
-    if (!video) return;
-    video.currentTime = inMarker;
-    video.play();
-    setPreviewing(true);
-  };
-
   // ── export clip ──────────────────────────────────────────────────────────
   const handleExport = async () => {
     if (!sectionPath || exporting) return;
@@ -543,25 +564,25 @@ function App() {
   }, []);
 
   const pxToTime = useCallback(
-    (px: number): number => {
-      const { width } = timelineDimensions();
-      if (width === 0) return 0;
+    (px: number, width?: number): number => {
+      const w = width ?? timelineWidth;
+      if (w === 0) return 0;
       const range = zoomMax - zoomMin;
       if (range <= 0) return 0;
-      return zoomMin + (px / width) * range;
+      return zoomMin + (px / w) * range;
     },
-    [zoomMin, zoomMax, timelineDimensions],
+    [zoomMin, zoomMax, timelineWidth],
   );
 
   const timeToPx = useCallback(
-    (t: number): number => {
-      const { width } = timelineDimensions();
-      if (width === 0) return 0;
+    (t: number, width?: number): number => {
+      const w = width ?? timelineWidth;
+      if (w === 0) return 0;
       const range = zoomMax - zoomMin;
       if (range <= 0) return 0;
-      return ((t - zoomMin) / range) * width;
+      return ((t - zoomMin) / range) * w;
     },
-    [zoomMin, zoomMax, timelineDimensions],
+    [zoomMin, zoomMax, timelineWidth],
   );
 
   // ── timeline pointer handlers ───────────────────────────────────────────
@@ -726,13 +747,13 @@ function App() {
   const renderTimeline = () => {
     if (!showTimeline) return null;
 
-    const w = timelineDimensions().width;
+    const w = timelineWidth;
     const range = zoomMax - zoomMin;
 
     // Bar segment highlight
-    const segLeft = timeToPx(inMarker);
-    const segRight = timeToPx(outMarker);
-    const playheadPx = timeToPx(currentTime);
+    const segLeft = timeToPx(inMarker, w);
+    const segRight = timeToPx(outMarker, w);
+    const playheadPx = timeToPx(currentTime, w);
 
     // Overview bar: zoom window position relative to full duration
     const overviewZoomLeft = duration > 0 ? (zoomMin / duration) * 100 : 0;
@@ -804,7 +825,7 @@ function App() {
           )}
 
           {/* Tick marks */}
-          {renderTicks(range, zoomMin)}
+          {renderTicks(range, zoomMin, w)}
         </div>
 
         {/* Overview bar */}
@@ -819,7 +840,7 @@ function App() {
   };
 
   // ── tick marks for zoom bar ─────────────────────────────────────────────
-  const renderTicks = (range: number, start: number) => {
+  const renderTicks = (range: number, start: number, barWidth: number) => {
     // Choose tick interval: aim for ~4-8 ticks
     const roughTick = range / 6;
     let interval: number;
@@ -833,7 +854,7 @@ function App() {
     const ticks: React.ReactNode[] = [];
     let t = Math.ceil(start / interval) * interval;
     while (t <= zoomMax) {
-      const px = timeToPx(t);
+      const px = timeToPx(t, barWidth);
       ticks.push(
         <div
           key={t}
@@ -1043,6 +1064,37 @@ function App() {
           </div>
         )}
       </footer>
+      {/* ── Preview modal ──────────────────────────────────────────────── */}
+      {previewOpen && (
+        <div className="preview-modal-overlay" onClick={closePreview}>
+          <div className="preview-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="preview-modal-header">
+              <span>Preview Clip</span>
+              <button className="preview-modal-close" onClick={closePreview}>
+                ✕
+              </button>
+            </div>
+            <div className="preview-modal-body">
+              {generatingPreview ? (
+                <div className="preview-modal-loading">
+                  <div className="spinner" />
+                  <span>Generating preview…</span>
+                </div>
+              ) : previewVideoSrc ? (
+                <video
+                  key={previewVideoSrc}
+                  ref={previewVideoRef}
+                  src={previewVideoSrc}
+                  controls
+                  className="preview-modal-video"
+                />
+              ) : (
+                <div className="preview-modal-error">Failed to generate preview</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

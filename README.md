@@ -107,16 +107,19 @@ Builds and runs. Core workflow complete:
 - [x] Transcript search with debounced query, match highlighting, and interpolated timestamps
 - [x] Segment merging (collapses YouTube's word-level fragments)
 - [x] Time-bounded section download via `yt-dlp --download-sections`
+- [x] Preview clip modal — renders the exact I/O range via ffmpeg, cached by time markers
+- [x] Preview stops on last frame (no auto-close), autoplays reliably via programmatic play
 - [x] Video player with play/pause, frame-stepping, and skip controls
-- [x] Zoomable timeline with draggable In/Out markers and playhead tracking
-- [x] Preview clip playback (plays from In to Out, stops at Out)
+- [x] Zoomable timeline with draggable In/Out markers and playhead tracking — renders immediately on section load
 - [x] Frame-perfect export via `ffmpeg` (`libx264`, ultrafast preset, CRF 18, AAC 192k)
 - [x] Multi-resolution export (Best, 1080p, 720p, 480p)
 - [x] Save dialog with suggested filename (video title + timestamp range)
 - [x] Live progress bars (download, model fetch, transcription, export encoding)
+- [x] HTML entity decoding in transcripts (`&amp;` `&lt;` `&nbsp;` etc. → readable text)
 - [x] Whisper.cpp fallback with auto-downloaded `ggml-tiny.bin`
 - [x] Local HTTP server with Range support for `<video>` element playback
 - [x] Video title detection for export filename suggestions
+- [x] Section downloads keyed by time range — re-selecting a segment downloads afresh
 
 ## License
 

@@ -147,8 +147,14 @@ impl Downloader {
             max_height
         );
 
-        let output_path = format!("{}/{}_section.mp4", output_dir, video_id);
-        let output_template = format!("{}/{}_section.%(ext)s", output_dir, video_id);
+        let output_path = format!(
+            "{}/{}_section_{}_{}.mp4",
+            output_dir, video_id, start_ms, end_ms
+        );
+        let output_template = format!(
+            "{}/{}_section_{}_{}.%(ext)s",
+            output_dir, video_id, start_ms, end_ms
+        );
 
         let _ = app.emit(
             "download-progress",

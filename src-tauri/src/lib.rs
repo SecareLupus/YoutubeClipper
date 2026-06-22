@@ -453,7 +453,40 @@ fn strip_tags(s: &str) -> String {
             _ => {}
         }
     }
-    result.trim().to_string()
+    decode_html_entities(result.trim())
+}
+
+/// Decode common HTML character entities: &amp; &lt; &gt; &nbsp; &quot; &#39;
+fn decode_html_entities(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '&' {
+            // Look forward for the matching ';'
+            if let Some(end) = chars[i..].iter().position(|&c| c == ';') {
+                let end = i + end;
+                let entity: String = chars[i..=end].iter().collect();
+                let replacement = match entity.as_str() {
+                    "&amp;" => Some('&'),
+                    "&lt;" => Some('<'),
+                    "&gt;" => Some('>'),
+                    "&nbsp;" => Some(' '),
+                    "&quot;" => Some('"'),
+                    "&#39;" | "&apos;" => Some('\''),
+                    _ => None,
+                };
+                if let Some(ch) = replacement {
+                    out.push(ch);
+                    i = end + 1;
+                    continue;
+                }
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
 }
 
 // ── download_section: time-bounded video download ─────────────────────────
@@ -639,7 +672,68 @@ fn parse_hhmmss(s: &str) -> Option<f64> {
     Some(h * 3600.0 + m * 60.0 + s)
 }
 
-// ── serve_video: local HTTP server so GStreamer can load the file ────────
+// ── preview_clip: re-encode the section to exact In/Out, serve as preview ──
+
+#[tauri::command]
+async fn preview_clip(
+    section_path: String,
+    start_sec: f64,
+    end_sec: f64,
+) -> Result<String, String> {
+    let duration = end_sec - start_sec;
+
+    // Deterministic filename from section path + markers — cached across runs
+    let stem = section_path
+        .strip_suffix(".mp4")
+        .unwrap_or(&section_path);
+    let preview_path = format!(
+        "{}_preview_{:.2}_{:.2}.mp4",
+        stem, start_sec, end_sec
+    );
+
+    // If already rendered with these exact markers, skip ffmpeg
+    if std::path::Path::new(&preview_path).exists() {
+        return serve_video(preview_path);
+    }
+
+    let ffmpeg = sidecar::resolve_sidecar("ffmpeg");
+
+    // -ss after -i: frame-accurate seek (decodes from start, discards before -ss).
+    // Re-encode (not -c copy) because the downloaded section has sparse keyframes
+    // and can't be trimmed at arbitrary positions without decoding.
+    let status = tokio::process::Command::new(&ffmpeg)
+        .args([
+            "-i",
+            &section_path,
+            "-ss",
+            &format!("{:.3}", start_sec),
+            "-t",
+            &format!("{:.3}", duration),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "23",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-y",
+            &preview_path,
+        ])
+        .status()
+        .await
+        .map_err(|e| format!("ffmpeg preview failed: {}", e))?;
+
+    if !status.success() {
+        return Err("ffmpeg preview cut failed".to_string());
+    }
+
+    serve_video(preview_path)
+}
+
+// ── serve_video: local HTTP server so the browser can load the file ────────
 
 #[tauri::command]
 fn serve_video(path: String) -> Result<String, String> {
@@ -755,6 +849,7 @@ pub fn run() {
             read_transcript,
             download_section,
             export_slice,
+            preview_clip,
             serve_video
         ])
         .run(tauri::generate_context!())
