@@ -83,10 +83,12 @@ jobs:
         run: |
           mkdir -p "$SIDECAR_DIR"
 
-          # yt-dlp — install via pip into a bundled venv
+          # yt-dlp — install via pip into a self-contained venv (--copies)
           # (the PyInstaller binary from GitHub releases fails inside AppImages
           #  with "No module named 'encodings'" — _MEIPASS extraction broken)
-          python3 -m venv "$SIDECAR_DIR/ytdlp-venv"
+          # (a regular venv symlinks to system python which linuxdeploy
+          #  doesn't bundle — --copies makes the venv fully portable)
+          python3 -m venv --copies "$SIDECAR_DIR/ytdlp-venv"
           "$SIDECAR_DIR/ytdlp-venv/bin/pip" install yt-dlp
           # Wrapper script — resolves venv relative to its own location
           printf '#!/bin/sh\nexec "$(dirname "$0")/ytdlp-venv/bin/python3" -m yt_dlp "$@"\n' > "$SIDECAR_DIR/yt-dlp"
