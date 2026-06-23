@@ -26,6 +26,7 @@ impl Downloader {
         url: &str,
     ) -> Result<Option<String>, String> {
         let ytdlp = resolve_sidecar(app, "yt-dlp");
+        eprintln!("[better-clipper] fetch_transcript: yt-dlp path = {ytdlp}");
         let output_template = format!("{}/{}.%(ext)s", output_dir, video_id);
 
         let _ = app.emit(
@@ -103,9 +104,18 @@ impl Downloader {
         let status = child
             .wait()
             .await
-            .map_err(|e| format!("yt-dlp transcript fetch error: {}", e))?;
+            .map_err(|e| {
+                eprintln!("[better-clipper] fetch_transcript: yt-dlp spawn error: {e}");
+                format!("yt-dlp transcript fetch error: {}", e)
+            })?;
+
+        eprintln!(
+            "[better-clipper] fetch_transcript: yt-dlp exit code = {}",
+            status.code().map_or(-1, |c| c)
+        );
 
         if !status.success() {
+            eprintln!("[better-clipper] fetch_transcript: yt-dlp failed (no captions?)");
             return Ok(None);
         }
 

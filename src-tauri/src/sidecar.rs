@@ -15,7 +15,7 @@ pub fn resolve_sidecar(app: &AppHandle, name: &str) -> String {
     #[cfg(debug_assertions)]
     {
         let _ = app;
-        name.to_string()
+        return name.to_string();
     }
 
     #[cfg(not(debug_assertions))]
@@ -24,20 +24,31 @@ pub fn resolve_sidecar(app: &AppHandle, name: &str) -> String {
         let binaries_dir = resource_dir.join("binaries");
         let triple_name = format!("{}-{}", name, env!("TAURI_ENV_TARGET_TRIPLE"));
 
-        // Check each possible location
+        eprintln!(
+            "[better-clipper] resolve_sidecar({name}): resource_dir={resource_dir:?}, target={}",
+            env!("TAURI_ENV_TARGET_TRIPLE")
+        );
+
         let candidates: &[std::path::PathBuf] = &[
-            resource_dir.join(name),               // resource root, plain name
-            binaries_dir.join(name),               // binaries/ subdir, plain name
-            binaries_dir.join(&triple_name),       // binaries/ subdir, triple-suffixed
+            resource_dir.join(name),
+            binaries_dir.join(name),
+            binaries_dir.join(&triple_name),
         ];
 
         for candidate in candidates {
-            if candidate.exists() {
+            let exists = candidate.exists();
+            eprintln!(
+                "[better-clipper]   try {:?} -> {}",
+                candidate,
+                if exists { "FOUND" } else { "missing" }
+            );
+            if exists {
                 return candidate.to_string_lossy().to_string();
             }
         }
 
-        // Fall back to the most likely path so the OS gives a clear error
-        binaries_dir.join(name).to_string_lossy().to_string()
+        let fallback = binaries_dir.join(name);
+        eprintln!("[better-clipper]   NOT FOUND — falling back to {fallback:?}");
+        fallback.to_string_lossy().to_string()
     }
 }

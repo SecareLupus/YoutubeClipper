@@ -50,6 +50,9 @@ async fn process_video(
     video_id: String,
     url: String,
 ) -> Result<serde_json::Value, String> {
+    eprintln!(
+        "[better-clipper] process_video id={video_id} url={url}",
+    );
     let cache = app.path().app_cache_dir().map_err(|e| e.to_string())?;
     let videos_dir = cache.join("videos");
     let transcripts_dir = cache.join("transcripts");
@@ -74,7 +77,10 @@ async fn process_video(
         &url,
     )
     .await
-    .map_err(|e| format!("Transcript fetch failed: {}", e))?;
+    .map_err(|e| {
+        eprintln!("[better-clipper] process_video: fetch_transcript error: {e}");
+        format!("Transcript fetch failed: {}", e)
+    })?;
 
     // Fetch video title for export filename suggestions
     let title = fetch_video_title(&app, &url).await;
@@ -838,6 +844,10 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|_app| {
+            eprintln!(
+                "[better-clipper] resource_dir = {:?}",
+                _app.path().resource_dir().unwrap_or_default()
+            );
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
