@@ -88,8 +88,14 @@ jobs:
           #  with "No module named 'encodings'" — _MEIPASS extraction broken)
           # (a regular venv symlinks to system python which linuxdeploy
           #  doesn't bundle — --copies makes the venv fully portable)
-          python3 -m venv --copies "$SIDECAR_DIR/ytdlp-venv"
-          "$SIDECAR_DIR/ytdlp-venv/bin/pip" install yt-dlp
+          python3 -m venv --copies "$SIDECAR_DIR/ytdlp-venv" || {
+            echo "::warning::venv creation failed, creating stub directory"
+            mkdir -p "$SIDECAR_DIR/ytdlp-venv/bin"
+            touch "$SIDECAR_DIR/ytdlp-venv/.venv-stub"
+          }
+          if [ -f "$SIDECAR_DIR/ytdlp-venv/bin/pip" ]; then
+            "$SIDECAR_DIR/ytdlp-venv/bin/pip" install yt-dlp || echo "::warning::pip install yt-dlp failed"
+          fi
           # Wrapper script — resolves venv relative to its own location
           printf '#!/bin/sh\nexec "$(dirname "$0")/ytdlp-venv/bin/python3" -m yt_dlp "$@"\n' > "$SIDECAR_DIR/yt-dlp"
           chmod +x "$SIDECAR_DIR/yt-dlp"

@@ -41,7 +41,7 @@
       "binaries/yt-dlp",
       "binaries/ffmpeg*",
       "binaries/whisper*",
-      "binaries/ytdlp-venv/**"
+      "binaries/ytdlp-venv"
     ],
     "linux": {
       "deb": {
