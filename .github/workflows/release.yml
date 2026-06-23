@@ -95,7 +95,7 @@ jobs:
           }
           if [ -f "$SIDECAR_DIR/ytdlp-venv/bin/pip" ]; then
             PYVER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-            cp -r "/usr/lib/python$PYVER" "$SIDECAR_DIR/ytdlp-venv/lib/"
+            cp -rL "/usr/lib/python$PYVER" "$SIDECAR_DIR/ytdlp-venv/lib/"
             "$SIDECAR_DIR/ytdlp-venv/bin/pip" install yt-dlp || echo "::warning::pip install yt-dlp failed"
           fi
           # Wrapper script — sets PYTHONHOME so the bundled stdlib is found
