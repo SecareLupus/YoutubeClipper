@@ -54,6 +54,7 @@ impl Downloader {
                 "--no-playlist",
                 url,
             ])
+            .env("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt")
             .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(|e| format!("Failed to spawn yt-dlp: {}", e))?;
@@ -63,9 +64,11 @@ impl Downloader {
             .take()
             .ok_or("Failed to capture yt-dlp stderr")?;
 
-        // Parse stderr for progress (same pattern as fetch_video)
+        // Parse stderr for progress AND collect full output for error logging
         let app_clone = app.clone();
         let vid = video_id.to_string();
+        let stderr_lines = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let stderr_lines_clone = stderr_lines.clone();
         tokio::spawn(async move {
             use tokio::io::AsyncBufReadExt;
             let mut reader = tokio::io::BufReader::new(stderr);
@@ -74,7 +77,8 @@ impl Downloader {
                 if n == 0 {
                     break;
                 }
-                let trimmed = line.trim();
+                let trimmed = line.trim().to_string();
+                stderr_lines_clone.lock().await.push(trimmed.clone());
                 if trimmed.contains("Downloading subtitles") || trimmed.contains("Downloading video subtitles") {
                     let _ = app_clone.emit("pipeline-progress", crate::PipelineProgress {
                         video_id: vid.clone(),
@@ -115,7 +119,12 @@ impl Downloader {
         );
 
         if !status.success() {
+            let lines = stderr_lines.lock().await;
             eprintln!("[better-clipper] fetch_transcript: yt-dlp failed (no captions?)");
+            eprintln!("[better-clipper] yt-dlp stderr (last 20 lines):");
+            for line in lines.iter().rev().take(20).rev() {
+                eprintln!("[better-clipper]   {line}");
+            }
             return Ok(None);
         }
 
@@ -190,6 +199,7 @@ impl Downloader {
                 "--no-playlist",
                 url,
             ])
+            .env("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt")
             .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(|e| format!("Failed to spawn yt-dlp: {}", e))?;
@@ -286,6 +296,7 @@ impl Downloader {
                 "--no-playlist",
                 url,
             ])
+            .env("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt")
             .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(|e| format!("Failed to spawn yt-dlp: {}", e))?;
