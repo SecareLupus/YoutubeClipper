@@ -54,7 +54,6 @@ impl Downloader {
                 "--no-playlist",
                 url,
             ])
-            .env("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt")
             .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(|e| format!("Failed to spawn yt-dlp: {}", e))?;
@@ -199,7 +198,6 @@ impl Downloader {
                 "--no-playlist",
                 url,
             ])
-            .env("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt")
             .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(|e| format!("Failed to spawn yt-dlp: {}", e))?;
@@ -296,7 +294,6 @@ impl Downloader {
                 "--no-playlist",
                 url,
             ])
-            .env("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt")
             .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(|e| format!("Failed to spawn yt-dlp: {}", e))?;

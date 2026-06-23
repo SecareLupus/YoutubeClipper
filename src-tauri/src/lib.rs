@@ -825,7 +825,6 @@ async fn fetch_video_title(app: &tauri::AppHandle, url: &str) -> String {
     let ytdlp = sidecar::resolve_sidecar(app, "yt-dlp");
     match tokio::process::Command::new(&ytdlp)
         .args(["--print", "title", "--no-playlist", url])
-        .env("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt")
         .output()
         .await
     {
