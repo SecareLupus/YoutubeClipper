@@ -113,6 +113,11 @@ jobs:
           cmake --build whisper-src/build --config Release -j
           cp whisper-src/build/bin/whisper-cli "$SIDECAR_DIR/whisper-cli"
 
+          # Placeholder for ytdlp-venv (needed by resources config on all OS;
+          # Linux creates the real venv, macOS/Windows get the stub)
+          mkdir -p "$SIDECAR_DIR/ytdlp-venv"
+          touch "$SIDECAR_DIR/ytdlp-venv/.venv-stub"
+
           ls -lh "$SIDECAR_DIR/"
 
       - name: Download sidecars (Windows)
@@ -125,6 +130,8 @@ jobs:
           # yt-dlp.exe
           Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" `
             -OutFile "$dir/yt-dlp.exe"
+          # Tauri resources checks literal paths — also provide without .exe
+          Copy-Item "$dir/yt-dlp.exe" "$dir/yt-dlp"
 
           # ffmpeg.exe (essentials build from gyan.dev)
           Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" `
@@ -139,6 +146,10 @@ jobs:
           cmake --build whisper-src/build --config Release -j
           Copy-Item whisper-src/build/bin/Release/whisper-cli.exe `
             "$dir/whisper-cli.exe"
+
+          # Placeholder for ytdlp-venv dir (needed by resources config on all OS)
+          New-Item -ItemType Directory -Force -Path "$dir/ytdlp-venv" | Out-Null
+          Set-Content -Path "$dir/ytdlp-venv/.venv-stub" -Value ""
 
           Get-ChildItem $dir
 
@@ -163,6 +174,11 @@ jobs:
           cmake -B whisper-src/build -DCMAKE_BUILD_TYPE=Release -S whisper-src
           cmake --build whisper-src/build --config Release -j
           cp whisper-src/build/bin/whisper-cli "$SIDECAR_DIR/whisper-cli"
+
+          # Placeholder for ytdlp-venv (needed by resources config on all OS;
+          # Linux creates the real venv, macOS/Windows get the stub)
+          mkdir -p "$SIDECAR_DIR/ytdlp-venv"
+          touch "$SIDECAR_DIR/ytdlp-venv/.venv-stub"
 
           ls -lh "$SIDECAR_DIR/"
 
