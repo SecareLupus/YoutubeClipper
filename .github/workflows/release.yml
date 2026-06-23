@@ -83,24 +83,23 @@ jobs:
         run: |
           mkdir -p "$SIDECAR_DIR"
 
-          # yt-dlp — self-contained venv with entire stdlib copied
-          # (the PyInstaller binary from GitHub releases fails inside AppImages
-          #  with "No module named 'encodings'" — _MEIPASS extraction broken)
-          # (--copies copies the Python binary but NOT the stdlib; we copy
-          #  /usr/lib/python3.x/ into the venv and set PYTHONHOME)
-          python3 -m venv --copies "$SIDECAR_DIR/ytdlp-venv" || {
-            echo "::warning::venv creation failed, creating stub directory"
-            mkdir -p "$SIDECAR_DIR/ytdlp-venv/bin"
-            touch "$SIDECAR_DIR/ytdlp-venv/.venv-stub"
-          }
-          if [ -f "$SIDECAR_DIR/ytdlp-venv/bin/pip" ]; then
-            PYVER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-            cp -rL "/usr/lib/python$PYVER" "$SIDECAR_DIR/ytdlp-venv/lib/"
-            "$SIDECAR_DIR/ytdlp-venv/bin/pip" install --retries 5 yt-dlp
-          fi
-          # Wrapper script — sets PYTHONHOME so the bundled stdlib is found
-          printf '#!/bin/sh\nVENV="$(dirname "$0")/ytdlp-venv"\nexport PYTHONHOME="$VENV"\nexec "$VENV/bin/python3" -m yt_dlp "$@"\n' > "$SIDECAR_DIR/yt-dlp"
+          # yt-dlp — standalone Python with yt-dlp installed
+          # python-build-standalone is a fully self-contained Python
+          # distribution (binary + stdlib in one directory). No venv,
+          # no PYTHONHOME, no symlink issues — just unpack and use.
+          PYTHON_URL="https://github.com/indygreg/python-build-standalone/releases/download/20250609/cpython-3.12.11+20250609-x86_64-unknown-linux-gnu-install_only.tar.gz"
+          curl -fsSL "$PYTHON_URL" -o python.tar.gz
+          mkdir -p "$SIDECAR_DIR/ytdlp-python"
+          tar -xzf python.tar.gz -C "$SIDECAR_DIR/ytdlp-python" --strip-components=1
+          "$SIDECAR_DIR/ytdlp-python/bin/python3" -m pip install --retries 5 yt-dlp
+          # Wrapper script
+          printf '#!/bin/sh\nexec "$(dirname "$0")/ytdlp-python/bin/python3" -m yt_dlp "$@"\n' > "$SIDECAR_DIR/yt-dlp"
           chmod +x "$SIDECAR_DIR/yt-dlp"
+
+          # Remove the old venv dir approach if it exists from stub
+          rm -rf "$SIDECAR_DIR/ytdlp-venv"
+          mkdir -p "$SIDECAR_DIR/ytdlp-venv"
+          touch "$SIDECAR_DIR/ytdlp-venv/.venv-stub"
 
           # ffmpeg (static build from BtbN/FFmpeg-Builds)
           curl -fsSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz" \
