@@ -83,23 +83,34 @@ jobs:
         run: |
           mkdir -p "$SIDECAR_DIR"
 
-          # yt-dlp — standalone Python with yt-dlp installed
-          # python-build-standalone is a fully self-contained Python
-          # distribution (binary + stdlib in one directory). No venv,
-          # no PYTHONHOME, no symlink issues — just unpack and use.
-          PYTHON_URL="https://github.com/astral-sh/python-build-standalone/releases/download/20241206/cpython-3.12.8%2B20241206-x86_64-unknown-linux-gnu-install_only.tar.gz"
-          curl -fsSL "$PYTHON_URL" -o python.tar.gz
-          mkdir -p "$SIDECAR_DIR/ytdlp-python"
-          tar -xzf python.tar.gz -C "$SIDECAR_DIR/ytdlp-python" --strip-components=1
-          "$SIDECAR_DIR/ytdlp-python/bin/python3" -m pip install --retries 5 yt-dlp
-          # Wrapper script
-          printf '#!/bin/sh\nexec "$(dirname "$0")/ytdlp-python/bin/python3" -m yt_dlp "$@"\n' > "$SIDECAR_DIR/yt-dlp"
+          # yt-dlp — bundle just the Python source, not a full Python runtime.
+          # At runtime the wrapper checks the host's PATH first; if yt-dlp
+          # is already installed, that version is used. If not, the bundled
+          # source runs via the host's system python3.
+          PYTHON_PKG_DIR="$SIDECAR_DIR/ytdlp-python"
+          mkdir -p "$PYTHON_PKG_DIR"
+          pip3 install --target "$PYTHON_PKG_DIR" yt-dlp
+          # Wrapper: try system yt-dlp first, fall back to bundled source
+          printf '%s\n' \
+            '#!/bin/sh' \
+            '# Prefer the host yt-dlp if installed' \
+            'if command -v yt-dlp 2>&1 >/dev/null; then' \
+            '  exec yt-dlp "$@"' \
+            'fi' \
+            '# Fall back to bundled yt-dlp via the host python3' \
+            'DIR="$(dirname "$0")"' \
+            'export PYTHONPATH="$DIR/ytdlp-python${PYTHONPATH:+:$PYTHONPATH}"' \
+            'if command -v python3 2>&1 >/dev/null; then' \
+            '  exec python3 -m yt_dlp "$@"' \
+            'else' \
+            '  echo "yt-dlp: not found on PATH, and python3 is not installed." >&2' \
+            '  echo "Install: pip3 install yt-dlp" >&2' \
+            '  exit 1' \
+            'fi' \
+            > "$SIDECAR_DIR/yt-dlp"
           chmod +x "$SIDECAR_DIR/yt-dlp"
-
-          # Remove the old venv dir approach if it exists from stub
-          rm -rf "$SIDECAR_DIR/ytdlp-venv"
-          mkdir -p "$SIDECAR_DIR/ytdlp-venv"
-          touch "$SIDECAR_DIR/ytdlp-venv/.venv-stub"
+          # Add bundled source to PYTHONPATH
+          echo "$PYTHON_PKG_DIR" > "$SIDECAR_DIR/ytdlp-python.pth"
 
           # ffmpeg (static build from BtbN/FFmpeg-Builds)
           curl -fsSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz" \
@@ -118,10 +129,6 @@ jobs:
           # Linux creates the real thing, macOS/Windows get the stub)
           mkdir -p "$SIDECAR_DIR/ytdlp-python"
           touch "$SIDECAR_DIR/ytdlp-python/.python-stub"
-          # Placeholder for ytdlp-venv (needed by resources config on all OS;
-          # Linux creates the real venv, macOS/Windows get the stub)
-          mkdir -p "$SIDECAR_DIR/ytdlp-venv"
-          touch "$SIDECAR_DIR/ytdlp-venv/.venv-stub"
 
           ls -lh "$SIDECAR_DIR/"
 
@@ -155,9 +162,6 @@ jobs:
           # Placeholder for ytdlp-python dir (needed by resources config on all OS)
           New-Item -ItemType Directory -Force -Path "$dir/ytdlp-python" | Out-Null
           Set-Content -Path "$dir/ytdlp-python/.python-stub" -Value ""
-          # Placeholder for ytdlp-venv dir (needed by resources config on all OS)
-          New-Item -ItemType Directory -Force -Path "$dir/ytdlp-venv" | Out-Null
-          Set-Content -Path "$dir/ytdlp-venv/.venv-stub" -Value ""
 
           Get-ChildItem $dir
 
@@ -187,10 +191,6 @@ jobs:
           # Linux creates the real thing, macOS/Windows get the stub)
           mkdir -p "$SIDECAR_DIR/ytdlp-python"
           touch "$SIDECAR_DIR/ytdlp-python/.python-stub"
-          # Placeholder for ytdlp-venv (needed by resources config on all OS;
-          # Linux creates the real venv, macOS/Windows get the stub)
-          mkdir -p "$SIDECAR_DIR/ytdlp-venv"
-          touch "$SIDECAR_DIR/ytdlp-venv/.venv-stub"
 
           ls -lh "$SIDECAR_DIR/"
 

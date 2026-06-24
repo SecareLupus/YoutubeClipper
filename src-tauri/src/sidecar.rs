@@ -6,11 +6,9 @@ use tauri::Manager;
 /// Resolve a sidecar binary path.
 ///
 /// In dev builds: returns the binary name directly (relies on PATH).
-/// In production: resolves relative to the app's resource directory.
-/// Tries (in order):
-///   1. `resource_dir/name`
-///   2. `resource_dir/binaries/name`
-///   3. `resource_dir/binaries/name-{target-triple}` (externalBin legacy)
+/// In production: checks the host's PATH first, then falls back to
+/// bundled resources. This lets the user's system-provided yt-dlp
+/// and ffmpeg take priority over bundled versions.
 pub fn resolve_sidecar(app: &AppHandle, name: &str) -> String {
     #[cfg(debug_assertions)]
     {
@@ -20,6 +18,13 @@ pub fn resolve_sidecar(app: &AppHandle, name: &str) -> String {
 
     #[cfg(not(debug_assertions))]
     {
+        // Check host PATH first — user's system version is always preferred
+        if let Ok(path) = which::which(name) {
+            let s = path.to_string_lossy().to_string();
+            eprintln!("[better-clipper] resolve_sidecar({name}): found on PATH -> {s}");
+            return s;
+        }
+
         let resource_dir = app.path().resource_dir().unwrap_or_default();
         let binaries_dir = resource_dir.join("binaries");
         let triple_name = format!("{}-{}", name, env!("TAURI_ENV_TARGET_TRIPLE"));

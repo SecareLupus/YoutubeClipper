@@ -1,0 +1,5 @@
+#!/bin/sh
+# Stub — replaced by CI with a real wrapper at build time.
+# In dev mode, resolve_sidecar returns just "yt-dlp" which uses PATH.
+echo "yt-dlp stub: not yet built. Run CI or place yt-dlp on PATH." >&2
+exit 1

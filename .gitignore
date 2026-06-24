@@ -3,4 +3,6 @@ dist/
 src-tauri/target/
 *.log
 .DS_Store
-src-tauri/binaries/
+src-tauri/binaries/*
+!src-tauri/binaries/yt-dlp
+!src-tauri/binaries/.gitkeep
