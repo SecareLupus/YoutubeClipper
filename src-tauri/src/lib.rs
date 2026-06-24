@@ -824,7 +824,11 @@ fn serve_video(path: String) -> Result<String, String> {
 async fn fetch_video_title(app: &tauri::AppHandle, url: &str) -> String {
     let ytdlp = sidecar::resolve_sidecar(app, "yt-dlp");
     match tokio::process::Command::new(&ytdlp)
-        .env_remove("LD_LIBRARY_PATH")
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", std::env::var("HOME").unwrap_or_default())
+        .env("USER", std::env::var("USER").unwrap_or_default())
+        .env("LANG", std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".into()))
         .args(["--print", "title", "--no-playlist", url])
         .output()
         .await

@@ -40,8 +40,14 @@ impl Downloader {
         );
 
         let mut child = tokio::process::Command::new(&ytdlp)
-            // AppImage LD_LIBRARY_PATH can shadow libs PyInstaller needs
-            .env_remove("LD_LIBRARY_PATH")
+            // The AppImage sets LD_LIBRARY_PATH, LD_PRELOAD, PYTHONHOME,
+            // and other vars that break PyInstaller's _MEIPASS extraction.
+            // Clear all inherited env and pass only what yt-dlp needs.
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", std::env::var("HOME").unwrap_or_default())
+            .env("USER", std::env::var("USER").unwrap_or_default())
+            .env("LANG", std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".into()))
             .args([
                 "--skip-download",
                 "--write-auto-subs",
@@ -187,8 +193,14 @@ impl Downloader {
         );
 
         let mut child = tokio::process::Command::new(&ytdlp)
-            // AppImage LD_LIBRARY_PATH can shadow libs PyInstaller needs
-            .env_remove("LD_LIBRARY_PATH")
+            // The AppImage sets LD_LIBRARY_PATH, LD_PRELOAD, PYTHONHOME,
+            // and other vars that break PyInstaller's _MEIPASS extraction.
+            // Clear all inherited env and pass only what yt-dlp needs.
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", std::env::var("HOME").unwrap_or_default())
+            .env("USER", std::env::var("USER").unwrap_or_default())
+            .env("LANG", std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".into()))
             .args([
                 "-f",
                 &format_flag,
@@ -287,8 +299,14 @@ impl Downloader {
         );
 
         let mut child = tokio::process::Command::new(&ytdlp)
-            // AppImage LD_LIBRARY_PATH can shadow libs PyInstaller needs
-            .env_remove("LD_LIBRARY_PATH")
+            // The AppImage sets LD_LIBRARY_PATH, LD_PRELOAD, PYTHONHOME,
+            // and other vars that break PyInstaller's _MEIPASS extraction.
+            // Clear all inherited env and pass only what yt-dlp needs.
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", std::env::var("HOME").unwrap_or_default())
+            .env("USER", std::env::var("USER").unwrap_or_default())
+            .env("LANG", std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".into()))
             .args([
                 "-f",
                 format_flag,
