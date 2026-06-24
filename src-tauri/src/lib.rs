@@ -853,18 +853,21 @@ pub fn run() {
                 "[better-clipper] resource_dir = {:?}",
                 app.path().resource_dir().unwrap_or_default()
             );
-            // GStreamer plugins in the AppImage may not have a registry cache.
-            // Force GStreamer to scan the bundled plugin directory directly.
-            // linuxdeploy copies plugins to /usr/lib/<triple>/gstreamer-1.0/
-            // inside the AppImage; also try host locations as fallback.
-            for dir in &[
-                "/usr/lib/x86_64-linux-gnu/gstreamer-1.0",
-                "/usr/lib/gstreamer-1.0",
-            ] {
-                if std::path::Path::new(dir).exists() {
-                    eprintln!("[better-clipper] GST_PLUGIN_SYSTEM_PATH = {dir}");
-                    std::env::set_var("GST_PLUGIN_SYSTEM_PATH", dir);
-                    break;
+            // GStreamer plugins are bundled as resources in gst-plugins/.
+            // Force GStreamer to scan that directory since there's no registry.
+            let bundled = app.path().resource_dir()
+                .unwrap_or_default()
+                .join("binaries/gst-plugins");
+            if bundled.exists() {
+                eprintln!("[better-clipper] GST_PLUGIN_SYSTEM_PATH = {:?}", bundled);
+                std::env::set_var("GST_PLUGIN_SYSTEM_PATH", &bundled);
+            } else {
+                eprintln!("[better-clipper] gst-plugins dir not found, trying system paths");
+                for dir in &["/usr/lib/x86_64-linux-gnu/gstreamer-1.0"] {
+                    if std::path::Path::new(dir).exists() {
+                        std::env::set_var("GST_PLUGIN_SYSTEM_PATH", dir);
+                        break;
+                    }
                 }
             }
             Ok(())

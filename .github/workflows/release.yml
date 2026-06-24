@@ -112,6 +112,15 @@ jobs:
           # Add bundled source to PYTHONPATH
           echo "$PYTHON_PKG_DIR" > "$SIDECAR_DIR/ytdlp-python.pth"
 
+          # GStreamer plugins — linuxdeploy doesn't bundle these automatically,
+          # but WebKit's <video> element needs them. Copy from CI machine.
+          GST_PLUGIN_DIR="$SIDECAR_DIR/gst-plugins"
+          mkdir -p "$GST_PLUGIN_DIR"
+          if [ -d /usr/lib/x86_64-linux-gnu/gstreamer-1.0 ]; then
+            cp -rL /usr/lib/x86_64-linux-gnu/gstreamer-1.0/* "$GST_PLUGIN_DIR/"
+          fi
+          ls "$GST_PLUGIN_DIR/" | head -5
+
           # ffmpeg (static build from BtbN/FFmpeg-Builds)
           curl -fsSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz" \
             -o ffmpeg.tar.xz

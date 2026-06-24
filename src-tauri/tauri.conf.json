@@ -41,7 +41,8 @@
       "binaries/yt-dlp",
       "binaries/ffmpeg*",
       "binaries/whisper*",
-      "binaries/ytdlp-python"
+      "binaries/ytdlp-python",
+      "binaries/gst-plugins"
     ],
     "linux": {
       "deb": {
