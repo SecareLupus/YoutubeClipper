@@ -87,7 +87,7 @@ jobs:
           # python-build-standalone is a fully self-contained Python
           # distribution (binary + stdlib in one directory). No venv,
           # no PYTHONHOME, no symlink issues — just unpack and use.
-          PYTHON_URL="https://github.com/indygreg/python-build-standalone/releases/download/20250609/cpython-3.12.11+20250609-x86_64-unknown-linux-gnu-install_only.tar.gz"
+          PYTHON_URL="https://github.com/astral-sh/python-build-standalone/releases/download/20241206/cpython-3.12.8%2B20241206-x86_64-unknown-linux-gnu-install_only.tar.gz"
           curl -fsSL "$PYTHON_URL" -o python.tar.gz
           mkdir -p "$SIDECAR_DIR/ytdlp-python"
           tar -xzf python.tar.gz -C "$SIDECAR_DIR/ytdlp-python" --strip-components=1
@@ -114,6 +114,10 @@ jobs:
           cmake --build whisper-src/build --config Release -j
           cp whisper-src/build/bin/whisper-cli "$SIDECAR_DIR/whisper-cli"
 
+          # Placeholder for ytdlp-python (needed by resources config on all OS;
+          # Linux creates the real thing, macOS/Windows get the stub)
+          mkdir -p "$SIDECAR_DIR/ytdlp-python"
+          touch "$SIDECAR_DIR/ytdlp-python/.python-stub"
           # Placeholder for ytdlp-venv (needed by resources config on all OS;
           # Linux creates the real venv, macOS/Windows get the stub)
           mkdir -p "$SIDECAR_DIR/ytdlp-venv"
@@ -148,6 +152,9 @@ jobs:
           Copy-Item whisper-src/build/bin/Release/whisper-cli.exe `
             "$dir/whisper-cli.exe"
 
+          # Placeholder for ytdlp-python dir (needed by resources config on all OS)
+          New-Item -ItemType Directory -Force -Path "$dir/ytdlp-python" | Out-Null
+          Set-Content -Path "$dir/ytdlp-python/.python-stub" -Value ""
           # Placeholder for ytdlp-venv dir (needed by resources config on all OS)
           New-Item -ItemType Directory -Force -Path "$dir/ytdlp-venv" | Out-Null
           Set-Content -Path "$dir/ytdlp-venv/.venv-stub" -Value ""
@@ -176,6 +183,10 @@ jobs:
           cmake --build whisper-src/build --config Release -j
           cp whisper-src/build/bin/whisper-cli "$SIDECAR_DIR/whisper-cli"
 
+          # Placeholder for ytdlp-python (needed by resources config on all OS;
+          # Linux creates the real thing, macOS/Windows get the stub)
+          mkdir -p "$SIDECAR_DIR/ytdlp-python"
+          touch "$SIDECAR_DIR/ytdlp-python/.python-stub"
           # Placeholder for ytdlp-venv (needed by resources config on all OS;
           # Linux creates the real venv, macOS/Windows get the stub)
           mkdir -p "$SIDECAR_DIR/ytdlp-venv"
