@@ -824,6 +824,7 @@ fn serve_video(path: String) -> Result<String, String> {
 async fn fetch_video_title(app: &tauri::AppHandle, url: &str) -> String {
     let ytdlp = sidecar::resolve_sidecar(app, "yt-dlp");
     match tokio::process::Command::new(&ytdlp)
+        .env_remove("LD_LIBRARY_PATH")
         .args(["--print", "title", "--no-playlist", url])
         .output()
         .await

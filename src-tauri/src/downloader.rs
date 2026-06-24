@@ -40,6 +40,8 @@ impl Downloader {
         );
 
         let mut child = tokio::process::Command::new(&ytdlp)
+            // AppImage LD_LIBRARY_PATH can shadow libs PyInstaller needs
+            .env_remove("LD_LIBRARY_PATH")
             .args([
                 "--skip-download",
                 "--write-auto-subs",
@@ -185,6 +187,8 @@ impl Downloader {
         );
 
         let mut child = tokio::process::Command::new(&ytdlp)
+            // AppImage LD_LIBRARY_PATH can shadow libs PyInstaller needs
+            .env_remove("LD_LIBRARY_PATH")
             .args([
                 "-f",
                 &format_flag,
@@ -283,6 +287,8 @@ impl Downloader {
         );
 
         let mut child = tokio::process::Command::new(&ytdlp)
+            // AppImage LD_LIBRARY_PATH can shadow libs PyInstaller needs
+            .env_remove("LD_LIBRARY_PATH")
             .args([
                 "-f",
                 format_flag,
