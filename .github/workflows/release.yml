@@ -134,6 +134,8 @@ jobs:
           cmake --build whisper-src/build --config Release -j
           cp whisper-src/build/bin/whisper-cli "$SIDECAR_DIR/whisper-cli"
 
+          mkdir -p "$SIDECAR_DIR/gst-plugins"
+          touch "$SIDECAR_DIR/gst-plugins/.gst-stub"
           # Placeholder for ytdlp-python (needed by resources config on all OS;
           # Linux creates the real thing, macOS/Windows get the stub)
           mkdir -p "$SIDECAR_DIR/ytdlp-python"
@@ -168,6 +170,9 @@ jobs:
           Copy-Item whisper-src/build/bin/Release/whisper-cli.exe `
             "$dir/whisper-cli.exe"
 
+          # Placeholder for gst-plugins dir (needed by resources config on all OS)
+          New-Item -ItemType Directory -Force -Path "$dir/gst-plugins" | Out-Null
+          Set-Content -Path "$dir/gst-plugins/.gst-stub" -Value ""
           # Placeholder for ytdlp-python dir (needed by resources config on all OS)
           New-Item -ItemType Directory -Force -Path "$dir/ytdlp-python" | Out-Null
           Set-Content -Path "$dir/ytdlp-python/.python-stub" -Value ""
@@ -196,6 +201,8 @@ jobs:
           cmake --build whisper-src/build --config Release -j
           cp whisper-src/build/bin/whisper-cli "$SIDECAR_DIR/whisper-cli"
 
+          mkdir -p "$SIDECAR_DIR/gst-plugins"
+          touch "$SIDECAR_DIR/gst-plugins/.gst-stub"
           # Placeholder for ytdlp-python (needed by resources config on all OS;
           # Linux creates the real thing, macOS/Windows get the stub)
           mkdir -p "$SIDECAR_DIR/ytdlp-python"
