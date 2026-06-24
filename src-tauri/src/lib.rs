@@ -848,11 +848,25 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
-        .setup(|_app| {
+        .setup(|app| {
             eprintln!(
                 "[better-clipper] resource_dir = {:?}",
-                _app.path().resource_dir().unwrap_or_default()
+                app.path().resource_dir().unwrap_or_default()
             );
+            // GStreamer plugins in the AppImage may not have a registry cache.
+            // Force GStreamer to scan the bundled plugin directory directly.
+            // linuxdeploy copies plugins to /usr/lib/<triple>/gstreamer-1.0/
+            // inside the AppImage; also try host locations as fallback.
+            for dir in &[
+                "/usr/lib/x86_64-linux-gnu/gstreamer-1.0",
+                "/usr/lib/gstreamer-1.0",
+            ] {
+                if std::path::Path::new(dir).exists() {
+                    eprintln!("[better-clipper] GST_PLUGIN_SYSTEM_PATH = {dir}");
+                    std::env::set_var("GST_PLUGIN_SYSTEM_PATH", dir);
+                    break;
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
