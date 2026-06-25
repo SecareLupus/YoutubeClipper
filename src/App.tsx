@@ -419,10 +419,10 @@ function App() {
       vid.play().catch(() => {});
     };
 
-    vid.addEventListener("canplay", play, { once: true });
+    vid.addEventListener("canplaythrough", play, { once: true });
 
     return () => {
-      vid.removeEventListener("canplay", play);
+      vid.removeEventListener("canplaythrough", play);
     };
   }, [previewVideoSrc]);
 
