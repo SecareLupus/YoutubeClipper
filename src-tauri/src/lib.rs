@@ -853,33 +853,6 @@ pub fn run() {
                 "[better-clipper] resource_dir = {:?}",
                 app.path().resource_dir().unwrap_or_default()
             );
-            // GStreamer plugins are bundled as resources in gst-plugins/.
-            // Force GStreamer to scan that directory since there's no registry.
-            let bundled = app.path().resource_dir()
-                .unwrap_or_default()
-                .join("binaries/gst-plugins");
-            if bundled.exists() {
-                eprintln!("[better-clipper] gst-plugins bundled at {:?}", bundled);
-                // Use GST_PLUGIN_PATH so GStreamer scans these plugins
-                std::env::set_var("GST_PLUGIN_PATH", &bundled);
-                // If a pre-generated registry exists, load it directly
-                let registry = app.path().resource_dir()
-                    .unwrap_or_default()
-                    .join("binaries/gst-registry.bin");
-                if registry.exists() {
-                    eprintln!("[better-clipper] GST_REGISTRY = {:?}", registry);
-                    std::env::set_var("GST_REGISTRY", &registry);
-                }
-                std::env::set_var("GST_REGISTRY_UPDATE", "no");
-            } else {
-                eprintln!("[better-clipper] gst-plugins dir not found, trying system paths");
-                for dir in &["/usr/lib/x86_64-linux-gnu/gstreamer-1.0"] {
-                    if std::path::Path::new(dir).exists() {
-                        std::env::set_var("GST_PLUGIN_SYSTEM_PATH", dir);
-                        break;
-                    }
-                }
-            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

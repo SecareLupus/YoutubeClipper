@@ -416,18 +416,13 @@ function App() {
 
     const play = () => {
       vid.currentTime = 0;
-      vid.play().catch(() => {}); // ignore if browser blocks
+      vid.play().catch(() => {});
     };
 
-    // If already have enough data, play immediately
-    if (vid.readyState >= 2) {
-      play();
-    } else {
-      vid.addEventListener("loadeddata", play, { once: true });
-    }
+    vid.addEventListener("canplay", play, { once: true });
 
     return () => {
-      vid.removeEventListener("loadeddata", play);
+      vid.removeEventListener("canplay", play);
     };
   }, [previewVideoSrc]);
 
