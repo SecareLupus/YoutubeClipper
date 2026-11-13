@@ -49,13 +49,30 @@ interface SearchMatch {
 
 interface ProcessResult {
   video_id: string;
-  transcript_path: string;
-  transcript_source: "youtube" | "whisper";
-  title: string;
   url: string;
+  title: string;
+  duration: number;
+  transcript_path: string | null;
+  transcript_source: "youtube" | "whisper" | null;
+  /** Why there is no transcript (null when transcript_path is set). */
+  caption_note: string | null;
 }
 
-const PAD_SECONDS = 10;
+/** An editing copy (transcript section or full video) and how its local
+ *  timeline maps to absolute video time. Mirrors media::EditSource. */
+interface EditSource {
+  path: string;
+  video_origin: number;
+  audio_origin: number;
+  frame_dur: number;
+}
+
+interface PreviewResult {
+  url: string;
+  start: number;
+  end: number;
+  frames: number;
+}
 
 /** Binary-search timepoints for the tightest enclosing timestamps of a char range.
  *  Returns interpolated ms — see plan doc for algorithm. */
@@ -161,15 +178,17 @@ function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
-  const [sectionPath, setSectionPath] = useState<string | null>(null);
+  const [edit, setEdit] = useState<EditSource | null>(null);
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
   const [downloadingSection, setDownloadingSection] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
-  const [quality, setQuality] = useState("1080p");
-  const [originalStartMs, setOriginalStartMs] = useState(0);
-  const [originalEndMs, setOriginalEndMs] = useState(0);
+  // 720p matches the editing copy, so export cuts locally with no re-download.
+  const [quality, setQuality] = useState("720p");
   const [previewVideoSrc, setPreviewVideoSrc] = useState<string | null>(null);
+  /** Full-video mode: set Out to the end once the duration is known. */
+  const pendingFullOutRef = useRef(false);
+  const sectionPath = edit?.path ?? null;
   const [previewOpen, setPreviewOpen] = useState(false);
   const [generatingPreview, setGeneratingPreview] = useState(false);
   const previewVideoRef = useRef<HTMLVideoElement>(null);
@@ -191,9 +210,11 @@ function App() {
   const inMarkerRef = useRef(inMarker);
   const outMarkerRef = useRef(outMarker);
   const durationRef = useRef(duration);
+  const frameDurRef = useRef(1 / 30);
   useEffect(() => { inMarkerRef.current = inMarker; }, [inMarker]);
   useEffect(() => { outMarkerRef.current = outMarker; }, [outMarker]);
   useEffect(() => { durationRef.current = duration; }, [duration]);
+  useEffect(() => { frameDurRef.current = edit?.frame_dur ?? 1 / 30; }, [edit]);
 
   // ── progress events ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -253,6 +274,10 @@ function App() {
         setDuration(d);
         setZoomMin(0);
         setZoomMax(d);
+        if (pendingFullOutRef.current) {
+          pendingFullOutRef.current = false;
+          setOutMarker(d);
+        }
       }
     };
 
@@ -307,8 +332,15 @@ function App() {
       )
         return;
 
-      const FRAME = 1 / 30;
+      const FRAME = frameDurRef.current;
       const ARROW_SKIP = 5; // seconds for left/right arrow
+      // Step exactly one frame on the file's real frame grid. Land 1ms inside
+      // the target frame so float rounding can't show its neighbour.
+      const stepFrames = (n: number) => {
+        const k = Math.floor(video.currentTime / FRAME + 1e-3) + n;
+        const max = (video.duration || Infinity) - FRAME / 2;
+        video.currentTime = Math.min(max, Math.max(0, k * FRAME + 0.001));
+      };
 
       const getKeypoints = (): number[] => {
         const pts = [
@@ -331,14 +363,13 @@ function App() {
           break;
         case ",":
           e.preventDefault();
-          video.currentTime = Math.max(0, video.currentTime - FRAME);
+          video.pause();
+          stepFrames(-1);
           break;
         case ".":
           e.preventDefault();
-          video.currentTime = Math.min(
-            video.duration || Infinity,
-            video.currentTime + FRAME,
-          );
+          video.pause();
+          stepFrames(1);
           break;
         case "ArrowLeft":
           e.preventDefault();
@@ -382,20 +413,22 @@ function App() {
 
   // ── preview clip: cut section with ffmpeg, play in modal ───────────────
   const handlePreviewClip = async () => {
-    if (!sectionPath || generatingPreview) return;
+    if (!edit || generatingPreview) return;
     setGeneratingPreview(true);
     setPreviewOpen(true);
     setStatusMsg("Generating preview...");
 
     try {
-      const url = (await invoke("preview_clip", {
-        sectionPath,
-        startSec: inMarker,
-        endSec: outMarker,
-      })) as string;
-      console.log("[preview] preview_clip URL", url);
-      setPreviewVideoSrc(url);
-      setStatusMsg("Preview ready");
+      const p = (await invoke("preview_clip", {
+        edit,
+        inSec: inMarker,
+        outSec: outMarker,
+      })) as PreviewResult;
+      console.log("[preview] preview_clip", p);
+      setPreviewVideoSrc(p.url);
+      setStatusMsg(
+        `Preview ready: ${p.frames} frames (${formatTimeSec(p.start)}–${formatTimeSec(p.end)})`,
+      );
     } catch (e) {
       setStatusMsg(`Preview failed: ${e}`);
       setPreviewOpen(false);
@@ -427,6 +460,24 @@ function App() {
   }, [previewVideoSrc]);
 
   // ── process video ───────────────────────────────────────────────────────
+  const resetEditor = () => {
+    setSelectedIdx(null);
+    setEdit(null);
+    setVideoSrc(null);
+    setDuration(0);
+    setCurrentTime(0);
+    pendingFullOutRef.current = false;
+  };
+
+  const loadTranscript = async (path: string, source: "youtube" | "whisper") => {
+    const td = (await invoke("read_transcript", { path })) as TranscriptData;
+    setSegments(td.segments);
+    setTranscriptData(td);
+    setStatusMsg(
+      `${td.segments.length} segments${source === "whisper" ? " (whisper)" : ""} — search or click one to preview`,
+    );
+  };
+
   const handleProcess = async () => {
     if (!url.trim()) return;
     setProcessing(true);
@@ -437,11 +488,7 @@ function App() {
     setSegments([]);
     setTranscriptData(null);
     setSearchQuery("");
-    setSelectedIdx(null);
-    setSectionPath(null);
-    setVideoSrc(null);
-    setDuration(0);
-    setCurrentTime(0);
+    resetEditor();
 
     try {
       const r = (await invoke("process_video", {
@@ -450,18 +497,11 @@ function App() {
       })) as ProcessResult;
 
       setResult(r);
-
-      const td = (await invoke("read_transcript", {
-        path: r.transcript_path,
-      })) as TranscriptData;
-
-      setSegments(td.segments);
-      setTranscriptData(td);
-      setStatusMsg(
-        r.transcript_source === "youtube"
-          ? `${td.segments.length} segments — search or click one to preview`
-          : `${td.segments.length} segments (whisper) — search or click one to preview`,
-      );
+      if (r.transcript_path) {
+        await loadTranscript(r.transcript_path, "youtube");
+      } else {
+        setStatusMsg(r.caption_note ?? "No captions found.");
+      }
       setProgress(100);
     } catch (e) {
       setStatusMsg(`Error: ${e}`);
@@ -470,56 +510,102 @@ function App() {
     }
   };
 
-  // ── segment click → download section ────────────────────────────────────
-  const handleSegmentClick = async (idx: number) => {
-    if (!result || downloadingSection) return;
-    setSelectedIdx(idx);
-    setDownloadingSection(true);
-    setSectionPath(null);
-    setVideoSrc(null);
-    setStatusMsg("Downloading section preview...");
-
-    const seg = segments[idx];
+  // ── no captions: whisper transcription ─────────────────────────────────
+  const handleTranscribe = async () => {
+    if (!result || processing) return;
+    setProcessing(true);
+    setProgress(0);
+    setStage("download");
+    setStatusMsg("Downloading audio for transcription...");
     try {
-      const path = (await invoke("download_section", {
+      const t = (await invoke("transcribe_video", {
         videoId: result.video_id,
         url: result.url,
-        startMs: seg.start_ms,
-        endMs: seg.end_ms,
-      })) as string;
-
-      const segStartSec = seg.start_ms / 1000;
-      const segEndSec = seg.end_ms / 1000;
-      const padBefore = Math.min(PAD_SECONDS, segStartSec);
-      setInMarker(padBefore);
-      setOutMarker(padBefore + (segEndSec - segStartSec));
-      setOriginalStartMs(seg.start_ms);
-      setOriginalEndMs(seg.end_ms);
-
-      setSectionPath(path);
-      const videoUrl = await invoke("serve_video", { path }) as string;
-      console.log("[video] serve_video URL", videoUrl);
-      setVideoSrc(videoUrl);
-      setStatusMsg(
-        `Section ready: ${formatTime(seg.start_ms)} – ${formatTime(seg.end_ms)}`,
-      );
+      })) as { transcript_path: string; transcript_source: "whisper" };
+      setResult({ ...result, transcript_path: t.transcript_path, transcript_source: "whisper", caption_note: null });
+      await loadTranscript(t.transcript_path, "whisper");
     } catch (e) {
-      setStatusMsg(`Section download failed: ${e}`);
+      setStatusMsg(`Transcription failed: ${e}`);
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  // ── open an editing copy in the player ─────────────────────────────────
+  const openEdit = async (src: EditSource, inSec: number, outSec: number) => {
+    setInMarker(Math.max(0, inSec));
+    setOutMarker(Math.max(0, outSec));
+    setEdit(src);
+    const videoUrl = (await invoke("serve_video", { path: src.path })) as string;
+    console.log("[video] serve_video URL", videoUrl);
+    setVideoSrc(videoUrl);
+  };
+
+  // ── no captions: full video for manual trimming ────────────────────────
+  const handleLoadFull = async () => {
+    if (!result || downloadingSection) return;
+    resetEditor();
+    setDownloadingSection(true);
+    setProgress(0);
+    setStage("download");
+    setStatusMsg("Downloading full video (720p)...");
+    try {
+      const src = (await invoke("load_full_video", {
+        videoId: result.video_id,
+        url: result.url,
+      })) as EditSource;
+      pendingFullOutRef.current = true; // Out = end once duration is known
+      await openEdit(src, 0, 0);
+      setStatusMsg("Full video loaded — set In/Out to trim.");
+    } catch (e) {
+      setStatusMsg(`${e}`);
     } finally {
       setDownloadingSection(false);
     }
   };
 
+  // ── segment / search match → download 720p section around it ───────────
+  const openSection = async (startMs: number, endMs: number) => {
+    if (!result || downloadingSection) return;
+    resetEditor();
+    setDownloadingSection(true);
+    setStatusMsg("Downloading section preview...");
+    try {
+      const src = (await invoke("download_section", {
+        videoId: result.video_id,
+        url: result.url,
+        startMs,
+        endMs,
+      })) as EditSource;
+      await openEdit(src, startMs / 1000 - src.video_origin, endMs / 1000 - src.video_origin);
+      setStatusMsg(`Section ready: ${formatTime(startMs)} – ${formatTime(endMs)}`);
+    } catch (e) {
+      setStatusMsg(`${e}`);
+    } finally {
+      setDownloadingSection(false);
+    }
+  };
+
+  const handleSegmentClick = async (idx: number) => {
+    const seg = segments[idx];
+    await openSection(seg.start_ms, seg.end_ms);
+    setSelectedIdx(idx);
+  };
+
   // ── export clip ──────────────────────────────────────────────────────────
   const handleExport = async () => {
-    if (!sectionPath || exporting) return;
+    if (!edit || !result || exporting) return;
 
-    // Suggest filename from video title + timestamp range
-    const title = (result?.title || "clip")
+    // Suggest filename from video title + absolute timestamp range
+    const title = (result.title || "clip")
       .replace(/[<>:"/\\|?*]/g, "") // strip invalid filename chars
       .trim()
       .slice(0, 80);
-    const suggestedName = `${title} ${formatTime(originalStartMs)}-${formatTime(originalEndMs)}`.replace(/\s+/g, " ");
+    const absIn = (edit.video_origin + inMarker) * 1000;
+    const absOut = (edit.video_origin + outMarker) * 1000;
+    const suggestedName = `${title} ${formatTime(absIn)}-${formatTime(absOut)}`
+      .replace(/:/g, ".")
+      .replace(/\s+/g, " ");
 
     const outPath = await save({
       defaultPath: `${suggestedName}.mp4`,
@@ -533,20 +619,20 @@ function App() {
     setStatusMsg("Exporting clip...");
 
     try {
-      const path = (await invoke("export_slice", {
-        videoId: result!.video_id,
-        url: result!.url,
-        startMs: originalStartMs,
-        endMs: originalEndMs,
-        startSec: inMarker,
-        endSec: outMarker,
+      const path = (await invoke("export_clip", {
+        videoId: result.video_id,
+        url: result.url,
+        edit,
+        inSec: inMarker,
+        outSec: outMarker,
         resolution: quality,
         outputPath: outPath,
       })) as string;
       setStatusMsg(`Exported: ${path}`);
     } catch (e) {
-      setExporting(false);
       setStatusMsg(`Export failed: ${e}`);
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -696,46 +782,16 @@ function App() {
     return { matches, total: totalHits };
   }, [transcriptData, debouncedQuery, textLower]);
 
-  const matchCount = searchMatches ? searchMatches.total : null;
+  // The scan stops counting past MAX_VISIBLE * 3 hits.
+  const matchCount = searchMatches
+    ? searchMatches.total > MAX_VISIBLE * 3
+      ? `${MAX_VISIBLE * 3}+`
+      : `${searchMatches.total}`
+    : null;
 
   // ── handle search match click ────────────────────────────────────────────
-  const handleSearchMatchClick = async (match: SearchMatch) => {
-    if (!result || downloadingSection) return;
-    setSelectedIdx(null);
-    setDownloadingSection(true);
-    setSectionPath(null);
-    setVideoSrc(null);
-    setStatusMsg("Downloading section preview...");
-
-    try {
-      const path = (await invoke("download_section", {
-        videoId: result.video_id,
-        url: result.url,
-        startMs: match.start_ms,
-        endMs: match.end_ms,
-      })) as string;
-
-      const segStartSec = match.start_ms / 1000;
-      const segEndSec = match.end_ms / 1000;
-      const padBefore = Math.min(PAD_SECONDS, segStartSec);
-      setInMarker(padBefore);
-      setOutMarker(padBefore + (segEndSec - segStartSec));
-      setOriginalStartMs(match.start_ms);
-      setOriginalEndMs(match.end_ms);
-
-      setSectionPath(path);
-      const videoUrl = await invoke("serve_video", { path }) as string;
-      console.log("[video] serve_video URL (search match)", videoUrl);
-      setVideoSrc(videoUrl);
-      setStatusMsg(
-        `Section ready: ${formatTime(match.start_ms)} – ${formatTime(match.end_ms)}`,
-      );
-    } catch (e) {
-      setStatusMsg(`Section download failed: ${e}`);
-    } finally {
-      setDownloadingSection(false);
-    }
-  };
+  const handleSearchMatchClick = (match: SearchMatch) =>
+    openSection(match.start_ms, match.end_ms);
 
   // ── timeline rendering ──────────────────────────────────────────────────
 
@@ -893,6 +949,9 @@ function App() {
           <span className="progress-text">{statusMsg}</span>
         </div>
       )}
+      {!(processing || downloadingSection) && statusMsg && (
+        <div className="status-line" title={statusMsg}>{statusMsg}</div>
+      )}
 
       <main className="main-layout">
         <section className="video-panel">
@@ -954,7 +1013,7 @@ function App() {
                 </div>
               )}
             </>
-          ) : result && !processing ? (
+          ) : result && !processing && !downloadingSection && result.transcript_path ? (
             <div className="video-ready">
               <div className="result-label">Transcript loaded</div>
               <code className="path">{result.transcript_path}</code>
@@ -966,7 +1025,20 @@ function App() {
               </div>
               <div className="hint">Search or click a segment to preview</div>
             </div>
-          ) : !processing ? (
+          ) : result && !processing && !downloadingSection ? (
+            <div className="video-ready">
+              <div className="result-label">No transcript</div>
+              <div className="hint">{result.caption_note}</div>
+              <div className="no-caption-actions">
+                <button className="preview-button" onClick={handleTranscribe}>
+                  Transcribe with Whisper
+                </button>
+                <button className="export-button" onClick={handleLoadFull}>
+                  Load full video (manual trim)
+                </button>
+              </div>
+            </div>
+          ) : !processing && !downloadingSection ? (
             <div className="video-placeholder">
               Enter a YouTube URL and click Load
             </div>
@@ -986,7 +1058,7 @@ function App() {
                 />
                 {matchCount !== null && (
                   <span className="match-count">
-                    {matchCount} / {segments.length}
+                    {matchCount} {matchCount === "1" ? "match" : "matches"}
                   </span>
                 )}
               </div>
@@ -1011,7 +1083,7 @@ function App() {
                       ))}
                       {searchMatches.total > searchMatches.matches.length && (
                         <div className="results-placeholder">
-                          +{searchMatches.total - searchMatches.matches.length} more — narrow your search
+                          More matches not shown — narrow your search
                         </div>
                       )}
                     </>
@@ -1043,7 +1115,13 @@ function App() {
           ) : (
             <div className="search-placeholder">
               <div className="results-placeholder">
-                {result ? "No segments found" : "No transcript loaded"}
+                {!result
+                  ? "No transcript loaded"
+                  : result.transcript_path
+                    ? "No segments found"
+                    : edit
+                      ? "Manual trim — no transcript"
+                      : "No transcript"}
               </div>
             </div>
           )}

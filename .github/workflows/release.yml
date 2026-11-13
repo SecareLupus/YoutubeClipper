@@ -13,6 +13,14 @@ permissions:
 
 env:
   SIDECAR_DIR: src-tauri/binaries
+  YT_DLP_VERSION: 2026.10.21
+  # Static, portable whisper-cli: no shared libwhisper/libggml, no libgomp,
+  # and an AVX/F16C baseline (no AVX2/FMA) so it runs on pre-Haswell CPUs.
+  # GGML_NATIVE=OFF alone defaults to AVX2 and SIGILLs on those machines.
+  WHISPER_CMAKE_FLAGS: >-
+    -DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_TESTS=OFF -DGGML_OPENMP=OFF
+    -DGGML_NATIVE=OFF -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_F16C=ON
+    -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_BMI2=OFF
 
 jobs:
   # ── tag ──────────────────────────────────────────────────────────────────
@@ -83,34 +91,12 @@ jobs:
         run: |
           mkdir -p "$SIDECAR_DIR"
 
-          # yt-dlp — bundle just the Python source, not a full Python runtime.
-          # At runtime the wrapper checks the host's PATH first; if yt-dlp
-          # is already installed, that version is used. If not, the bundled
-          # source runs via the host's system python3.
-          PYTHON_PKG_DIR="$SIDECAR_DIR/ytdlp-python"
-          mkdir -p "$PYTHON_PKG_DIR"
-          pip3 install --target "$PYTHON_PKG_DIR" yt-dlp
-          # Wrapper: try system yt-dlp first, fall back to bundled source
-          printf '%s\n' \
-            '#!/bin/sh' \
-            '# Prefer the host yt-dlp if installed' \
-            'if command -v yt-dlp 2>&1 >/dev/null; then' \
-            '  exec yt-dlp "$@"' \
-            'fi' \
-            '# Fall back to bundled yt-dlp via the host python3' \
-            'DIR="$(dirname "$0")"' \
-            'export PYTHONPATH="$DIR/ytdlp-python${PYTHONPATH:+:$PYTHONPATH}"' \
-            'if command -v python3 2>&1 >/dev/null; then' \
-            '  exec python3 -m yt_dlp "$@"' \
-            'else' \
-            '  echo "yt-dlp: not found on PATH, and python3 is not installed." >&2' \
-            '  echo "Install: pip3 install yt-dlp" >&2' \
-            '  exit 1' \
-            'fi' \
-            > "$SIDECAR_DIR/yt-dlp"
+          # yt-dlp — self-contained PyInstaller binary (bundles its own Python),
+          # pinned to YT_DLP_VERSION so caption extraction stays current with
+          # YouTube's changes (PO-token enforcement, player-client churn).
+          curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/download/${YT_DLP_VERSION}/yt-dlp_linux" \
+            -o "$SIDECAR_DIR/yt-dlp"
           chmod +x "$SIDECAR_DIR/yt-dlp"
-          # Add bundled source to PYTHONPATH
-          echo "$PYTHON_PKG_DIR" > "$SIDECAR_DIR/ytdlp-python.pth"
 
           # ffmpeg (static build from BtbN/FFmpeg-Builds)
           curl -fsSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz" \
@@ -121,12 +107,9 @@ jobs:
 
           # whisper-cli (build from source — fast, ~30s)
           git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git whisper-src
-          cmake -B whisper-src/build -DCMAKE_BUILD_TYPE=Release -S whisper-src
+          cmake -B whisper-src/build -DCMAKE_BUILD_TYPE=Release $WHISPER_CMAKE_FLAGS -S whisper-src
           cmake --build whisper-src/build --config Release -j
           cp whisper-src/build/bin/whisper-cli "$SIDECAR_DIR/whisper-cli"
-
-          mkdir -p "$SIDECAR_DIR/ytdlp-python"
-          touch "$SIDECAR_DIR/ytdlp-python/.python-stub"
 
           ls -lh "$SIDECAR_DIR/"
 
@@ -137,8 +120,8 @@ jobs:
           $dir = "$env:SIDECAR_DIR"
           New-Item -ItemType Directory -Force -Path $dir
 
-          # yt-dlp.exe
-          Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" `
+          # yt-dlp.exe (pinned to YT_DLP_VERSION)
+          Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/download/$env:YT_DLP_VERSION/yt-dlp.exe" `
             -OutFile "$dir/yt-dlp.exe"
           # Tauri resources checks literal paths — also provide without .exe
           Copy-Item "$dir/yt-dlp.exe" "$dir/yt-dlp"
@@ -152,14 +135,10 @@ jobs:
 
           # whisper-cli.exe (build from source)
           git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git whisper-src
-          cmake -B whisper-src/build -DCMAKE_BUILD_TYPE=Release -S whisper-src
+          cmake -B whisper-src/build -DCMAKE_BUILD_TYPE=Release @($env:WHISPER_CMAKE_FLAGS -split ' ') -S whisper-src
           cmake --build whisper-src/build --config Release -j
           Copy-Item whisper-src/build/bin/Release/whisper-cli.exe `
             "$dir/whisper-cli.exe"
-
-          # Placeholder for ytdlp-python dir (needed by resources config on all OS)
-          New-Item -ItemType Directory -Force -Path "$dir/ytdlp-python" | Out-Null
-          Set-Content -Path "$dir/ytdlp-python/.python-stub" -Value ""
 
           Get-ChildItem $dir
 
@@ -168,8 +147,8 @@ jobs:
         run: |
           mkdir -p "$SIDECAR_DIR"
 
-          # yt-dlp
-          curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos" \
+          # yt-dlp (pinned to YT_DLP_VERSION)
+          curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/download/${YT_DLP_VERSION}/yt-dlp_macos" \
             -o "$SIDECAR_DIR/yt-dlp"
           chmod +x "$SIDECAR_DIR/yt-dlp"
 
@@ -181,12 +160,9 @@ jobs:
 
           # whisper-cli (build from source)
           git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git whisper-src
-          cmake -B whisper-src/build -DCMAKE_BUILD_TYPE=Release -S whisper-src
+          cmake -B whisper-src/build -DCMAKE_BUILD_TYPE=Release $WHISPER_CMAKE_FLAGS -S whisper-src
           cmake --build whisper-src/build --config Release -j
           cp whisper-src/build/bin/whisper-cli "$SIDECAR_DIR/whisper-cli"
-
-          mkdir -p "$SIDECAR_DIR/ytdlp-python"
-          touch "$SIDECAR_DIR/ytdlp-python/.python-stub"
 
           ls -lh "$SIDECAR_DIR/"
 
@@ -218,16 +194,14 @@ jobs:
 
             ### Linux
             - `BetterClipper_${{ inputs.version }}_amd64.deb` — Ubuntu 24.04+, Debian 13+
-            - `BetterClipper_${{ inputs.version }}_amd64.AppImage` — any Linux (self-contained)
             - `BetterClipper-${{ inputs.version }}-1.x86_64.rpm` — Fedora 39+, openSUSE Tumbleweed
 
             ### Windows
-            - `.msi` installer
             - `.exe` installer (NSIS)
 
             ### macOS
             - `.dmg` disk image
 
-            Requires `yt-dlp`, `ffmpeg`, and `whisper-cli` — bundled in the AppImage, included as sidecars on Windows/macOS.
+            `yt-dlp` (pinned ${{ env.YT_DLP_VERSION }}), `ffmpeg`, and `whisper-cli` are bundled. Installing `deno` is recommended for full YouTube support in yt-dlp.
           releaseDraft: false
           prerelease: false

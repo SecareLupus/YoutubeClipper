@@ -1,12 +1,15 @@
 use serde::Serialize;
-use std::io::{Read, Write, Seek, SeekFrom};
-use std::net::TcpListener;
 use tauri::Emitter;
 use tauri::Manager;
 
 mod downloader;
+mod media;
+mod server;
 mod sidecar;
 mod transcriber;
+
+use downloader::{emit_pipeline, Downloader, EDIT_RESOLUTION};
+use media::EditSource;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PipelineProgress {
@@ -42,138 +45,110 @@ pub struct ExportProgress {
     pub status: String,
 }
 
-// ── process_video: fetch transcript only (no video download) ──────────────
+/// Seconds of context downloaded on each side of a transcript segment.
+const SECTION_PAD_SECS: f64 = 10.0;
+/// Seconds of slack around the clip when downloading at export quality.
+const EXPORT_PAD_SECS: f64 = 3.0;
 
+fn cache_subdir(app: &tauri::AppHandle, name: &str) -> Result<std::path::PathBuf, String> {
+    let dir = app.path().app_cache_dir().map_err(|e| e.to_string())?.join(name);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+// ── process_video: metadata + captions (no video download) ────────────────
+
+/// Fetch title/duration and, if the video has English captions, the
+/// transcript. When there is no usable transcript, returns
+/// `transcript_path: null` and a `caption_note` explaining why; the UI then
+/// offers whisper transcription or manual trimming.
 #[tauri::command]
 async fn process_video(
     app: tauri::AppHandle,
     video_id: String,
     url: String,
 ) -> Result<serde_json::Value, String> {
-    eprintln!(
-        "[better-clipper] process_video id={video_id} url={url}",
-    );
-    let cache = app.path().app_cache_dir().map_err(|e| e.to_string())?;
-    let videos_dir = cache.join("videos");
-    let transcripts_dir = cache.join("transcripts");
-    std::fs::create_dir_all(&videos_dir).map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&transcripts_dir).map_err(|e| e.to_string())?;
+    eprintln!("[better-clipper] process_video id={video_id} url={url}");
+    let videos_dir = cache_subdir(&app, "videos")?;
+    let transcripts_dir = cache_subdir(&app, "transcripts")?;
+    let videos_dir_s = videos_dir.to_string_lossy().to_string();
 
-    // Stage 1: Fetch captions (fast, no video)
-    let _ = app.emit(
-        "pipeline-progress",
-        PipelineProgress {
-            video_id: video_id.clone(),
-            stage: "fetching_transcript".to_string(),
-            message: "Checking for captions...".to_string(),
-            percent: 10.0,
-        },
-    );
+    emit_pipeline(&app, &video_id, "fetching_transcript", "Reading video info...", 10.0);
 
-    let yt_vtt = downloader::Downloader::fetch_transcript(
-        &app,
-        &videos_dir.to_string_lossy(),
-        &video_id,
-        &url,
-    )
-    .await
-    .map_err(|e| {
-        eprintln!("[better-clipper] process_video: fetch_transcript error: {e}");
-        format!("Transcript fetch failed: {}", e)
-    })?;
-
-    // Fetch video title for export filename suggestions
-    let title = fetch_video_title(&app, &url).await;
-
-    if let Some(vtt_path) = yt_vtt {
-        let dest_vtt = transcripts_dir.join(format!("{}.vtt", video_id));
-        std::fs::copy(&vtt_path, &dest_vtt).map_err(|e| e.to_string())?;
-
-        let _ = app.emit(
-            "pipeline-progress",
-            PipelineProgress {
-                video_id: video_id.clone(),
-                stage: "done".to_string(),
-                message: "Transcript ready — select a segment to preview.".to_string(),
-                percent: 100.0,
-            },
-        );
-
-        return Ok(serde_json::json!({
-            "video_id": video_id,
-            "transcript_path": dest_vtt.to_string_lossy(),
-            "transcript_source": "youtube",
-            "title": title,
-            "url": url,
-        }));
-    }
-
-    // No captions — download full video and transcribe with whisper
-    let _ = app.emit(
-        "pipeline-progress",
-        PipelineProgress {
-            video_id: video_id.clone(),
-            stage: "download".to_string(),
-            message: "No captions — downloading video for transcription...".to_string(),
-            percent: 15.0,
-        },
-    );
-
-    let preview_path = downloader::Downloader::fetch_video(
-        &app,
-        &videos_dir.to_string_lossy(),
-        &video_id,
-        "720p",
-        &url,
-    )
-    .await
-    .map_err(|e| format!("Download failed: {}", e))?;
-
-    let _ = app.emit(
-        "pipeline-progress",
-        PipelineProgress {
-            video_id: video_id.clone(),
-            stage: "extract_audio".to_string(),
-            message: "Extracting audio...".to_string(),
-            percent: 35.0,
-        },
-    );
-
-    let wav_path = cache.join("audio").join(format!("{}.wav", &video_id));
-    if let Some(parent) = wav_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-
-    transcriber::Transcriber::extract_audio(&app, &preview_path, &wav_path.to_string_lossy())
+    let info = Downloader::fetch_info(&app, &videos_dir_s, &video_id, &url)
         .await
-        .map_err(|e| format!("Audio extraction failed: {}", e))?;
+        .map_err(|e| format!("Couldn't load this video. {e}"))?;
 
-    let _ = app.emit(
-        "pipeline-progress",
-        PipelineProgress {
-            video_id: video_id.clone(),
-            stage: "ensure_model".to_string(),
-            message: "Checking whisper model...".to_string(),
-            percent: 50.0,
-        },
-    );
+    let mut transcript_path: Option<String> = None;
+    let caption_note: Option<String> = match &info.caption_track {
+        Some((lang, _)) => {
+            match Downloader::fetch_captions(&app, &videos_dir_s, &video_id, &info).await {
+                Ok(vtt) => {
+                    let dest = transcripts_dir.join(format!("{}.vtt", video_id));
+                    std::fs::copy(&vtt, &dest).map_err(|e| e.to_string())?;
+                    transcript_path = Some(dest.to_string_lossy().to_string());
+                    None
+                }
+                Err(e) => Some(format!(
+                    "This video has captions ({lang}) but they couldn't be downloaded: {e}"
+                )),
+            }
+        }
+        None if info.available_langs.is_empty() => Some("This video has no captions.".into()),
+        None => Some(format!(
+            "This video has no English captions (available: {}).",
+            info.available_langs.join(", ")
+        )),
+    };
 
+    let done_msg = if transcript_path.is_some() {
+        "Transcript ready — select a segment to preview."
+    } else {
+        "No usable captions."
+    };
+    emit_pipeline(&app, &video_id, "done", done_msg, 100.0);
+
+    Ok(serde_json::json!({
+        "video_id": video_id,
+        "url": url,
+        "title": info.title,
+        "duration": info.duration,
+        "transcript_path": transcript_path,
+        "transcript_source": transcript_path.as_ref().map(|_| "youtube"),
+        "caption_note": caption_note,
+    }))
+}
+
+// ── transcribe_video: whisper fallback (audio only) ───────────────────────
+
+#[tauri::command]
+async fn transcribe_video(
+    app: tauri::AppHandle,
+    video_id: String,
+    url: String,
+) -> Result<serde_json::Value, String> {
+    let videos_dir = cache_subdir(&app, "videos")?;
+    let audio_dir = cache_subdir(&app, "audio")?;
+    let transcripts_dir = cache_subdir(&app, "transcripts")?;
+
+    emit_pipeline(&app, &video_id, "download", "Downloading audio...", 5.0);
+    let audio = Downloader::fetch_audio(&app, &videos_dir.to_string_lossy(), &video_id, &url)
+        .await
+        .map_err(|e| format!("Audio download failed: {e}"))?;
+
+    emit_pipeline(&app, &video_id, "extract_audio", "Converting audio...", 32.0);
+    let wav_path = audio_dir.join(format!("{}.wav", &video_id));
+    transcriber::Transcriber::extract_audio(&app, &audio, &wav_path.to_string_lossy())
+        .await
+        .map_err(|e| format!("Audio extraction failed: {e}"))?;
+
+    emit_pipeline(&app, &video_id, "ensure_model", "Checking whisper model...", 40.0);
     let model_path = transcriber::Transcriber::ensure_model(&app)
         .await
-        .map_err(|e| format!("Model setup failed: {}", e))?;
+        .map_err(|e| format!("Whisper model setup failed: {e}"))?;
 
-    let _ = app.emit(
-        "pipeline-progress",
-        PipelineProgress {
-            video_id: video_id.clone(),
-            stage: "transcribe".to_string(),
-            message: "Transcribing with whisper...".to_string(),
-            percent: 60.0,
-        },
-    );
-
+    emit_pipeline(&app, &video_id, "transcribe", "Transcribing with whisper...", 55.0);
     let output_prefix = transcripts_dir.join(&video_id).to_string_lossy().to_string();
-
     let vtt_path = transcriber::Transcriber::transcribe(
         &app,
         &model_path,
@@ -181,25 +156,14 @@ async fn process_video(
         &output_prefix,
     )
     .await
-    .map_err(|e| format!("Transcription failed: {}", e))?;
+    .map_err(|e| format!("Transcription failed: {e}"))?;
+    let _ = std::fs::remove_file(&wav_path);
 
-    let _ = app.emit(
-        "pipeline-progress",
-        PipelineProgress {
-            video_id: video_id.clone(),
-            stage: "done".to_string(),
-            message: "Transcription complete — select a segment to preview.".to_string(),
-            percent: 100.0,
-        },
-    );
+    emit_pipeline(&app, &video_id, "done", "Transcription complete.", 100.0);
 
     Ok(serde_json::json!({
-        "video_id": video_id,
-        "preview_path": preview_path,
         "transcript_path": vtt_path,
         "transcript_source": "whisper",
-        "title": title,
-        "url": url,
     }))
 }
 
@@ -388,7 +352,7 @@ fn find_overlap_suffix(a: &str, b: &str) -> Option<usize> {
     None
 }
 
-// ── download_section: time-bounded video download ─────────────────────────
+// ── VTT timestamp parsing ─────────────────────────────────────────────────
 fn parse_timestamp_line(line: &str) -> Option<(u64, u64)> {
     let mut parts = line.split("-->");
     let start_str = parts.next()?.trim();
@@ -495,8 +459,10 @@ fn decode_html_entities(s: &str) -> String {
     out
 }
 
-// ── download_section: time-bounded video download ─────────────────────────
+// ── editing sources: transcript section or full video ─────────────────────
 
+/// Download the editing copy (720p) of a transcript segment ± padding and
+/// describe how its local timeline maps to absolute video time.
 #[tauri::command]
 async fn download_section(
     app: tauri::AppHandle,
@@ -504,339 +470,191 @@ async fn download_section(
     url: String,
     start_ms: u64,
     end_ms: u64,
-) -> Result<String, String> {
-    let output_dir = app
-        .path()
-        .app_cache_dir()
-        .map_err(|e| e.to_string())?
-        .join("videos")
-        .to_string_lossy()
-        .to_string();
+) -> Result<EditSource, String> {
+    let videos_dir = cache_subdir(&app, "videos")?;
+    // Whole-second section bounds (yt-dlp starts the video at the first frame
+    // at or after this point; see media.rs).
+    let start_sec = (start_ms as f64 / 1000.0 - SECTION_PAD_SECS).max(0.0).floor() as u64;
+    let end_sec = (end_ms as f64 / 1000.0 + SECTION_PAD_SECS).ceil() as u64;
 
-    downloader::Downloader::fetch_section(&app, &output_dir, &video_id, &url, start_ms, end_ms, 10, "480p").await
-}
-
-// ── export_slice: ffmpeg re-encode with in/out markers ──────────────────
-
-#[tauri::command]
-async fn export_slice(
-    app: tauri::AppHandle,
-    video_id: String,
-    url: String,
-    start_ms: u64,
-    end_ms: u64,
-    start_sec: f64,
-    end_sec: f64,
-    resolution: String,
-    output_path: String,
-) -> Result<String, String> {
-    // Step 1: download section at requested quality
-    let videos_dir = app
-        .path()
-        .app_cache_dir()
-        .map_err(|e| e.to_string())?
-        .join("videos");
-    std::fs::create_dir_all(&videos_dir).map_err(|e| e.to_string())?;
-
-    let section_path = downloader::Downloader::fetch_section(
+    let path = Downloader::fetch_section(
         &app,
         &videos_dir.to_string_lossy(),
         &video_id,
         &url,
-        start_ms,
-        end_ms,
-        10,
-        &resolution,
+        start_sec,
+        end_sec,
+        EDIT_RESOLUTION,
     )
     .await
-    .map_err(|e| format!("Download failed: {}", e))?;
+    .map_err(|e| format!("Section download failed: {e}"))?;
 
-    // Step 2: re-encode with ffmpeg
-    let duration = end_sec - start_sec + 1.0 / 30.0;
-    let final_path = if output_path.is_empty() {
-        let exports_dir = app
-            .path()
-            .app_cache_dir()
-            .map_err(|e| e.to_string())?
-            .join("exports");
-        std::fs::create_dir_all(&exports_dir).map_err(|e| e.to_string())?;
-        exports_dir
-            .join(format!(
-                "clip_{}.mp4",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-            ))
-            .to_string_lossy()
-            .to_string()
-    } else {
-        output_path
-    };
-
-    let ffmpeg = sidecar::resolve_sidecar(&app, "ffmpeg");
-
-    let _ = app.emit(
-        "export-progress",
-        ExportProgress {
-            percent: 0.0,
-            status: "encoding".to_string(),
-        },
-    );
-
-    let mut child = tokio::process::Command::new(&ffmpeg)
-        .args([
-            "-i",
-            &section_path,
-            "-ss",
-            &format!("{:.3}", start_sec),
-            "-to",
-            &format!("{:.3}", end_sec + 1.0 / 30.0),
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-crf",
-            "18",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-y",
-            &final_path,
-        ])
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn ffmpeg: {}", e))?;
-
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or("Failed to capture ffmpeg stderr")?;
-
-    let app_clone = app.clone();
-    tokio::spawn(async move {
-        use tokio::io::AsyncBufReadExt;
-        let mut reader = tokio::io::BufReader::new(stderr);
-        let mut line = String::new();
-        while let Ok(n) = reader.read_line(&mut line).await {
-            if n == 0 {
-                break;
-            }
-            if let Some(time_sec) = parse_ffmpeg_time(&line) {
-                if duration > 0.0 {
-                    let pct = (time_sec / duration * 100.0).min(99.0);
-                    let _ = app_clone.emit(
-                        "export-progress",
-                        ExportProgress {
-                            percent: pct,
-                            status: "encoding".to_string(),
-                        },
-                    );
-                }
-            }
-            line.clear();
-        }
-    });
-
-    let status = child
-        .wait()
-        .await
-        .map_err(|e| format!("ffmpeg process error: {}", e))?;
-
-    if status.success() {
-        let _ = app.emit(
-            "export-progress",
-            ExportProgress {
-                percent: 100.0,
-                status: "complete".to_string(),
-            },
-        );
-        Ok(final_path)
-    } else {
-        Err("ffmpeg export failed".to_string())
-    }
+    section_source(&app, path, start_sec as f64).await
 }
 
-/// Parse ffmpeg progress line: "frame= 123 ... time=00:00:05.12 bitrate=..."
-fn parse_ffmpeg_time(line: &str) -> Option<f64> {
-    let idx = line.find("time=")?;
-    let rest = &line[idx + "time=".len()..];
-    let time_str = rest.split_whitespace().next()?;
-    parse_hhmmss(time_str)
+/// Download the whole video (720p) for manual trimming.
+#[tauri::command]
+async fn load_full_video(
+    app: tauri::AppHandle,
+    video_id: String,
+    url: String,
+) -> Result<EditSource, String> {
+    let videos_dir = cache_subdir(&app, "videos")?;
+    let path = Downloader::fetch_full_video(
+        &app,
+        &videos_dir.to_string_lossy(),
+        &video_id,
+        &url,
+        EDIT_RESOLUTION,
+    )
+    .await
+    .map_err(|e| format!("Video download failed: {e}"))?;
+    section_source(&app, path, 0.0).await
 }
 
-/// Parse "HH:MM:SS.mm" → seconds as f64
-fn parse_hhmmss(s: &str) -> Option<f64> {
-    let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let h: f64 = parts[0].parse().ok()?;
-    let m: f64 = parts[1].parse().ok()?;
-    let s: f64 = parts[2].parse().ok()?;
-    Some(h * 3600.0 + m * 60.0 + s)
+async fn section_source(app: &tauri::AppHandle, path: String, requested_start: f64) -> Result<EditSource, String> {
+    let ffmpeg = sidecar::resolve_sidecar(app, "ffmpeg");
+    let frame_dur = media::probe_frame_dur(&ffmpeg, &path).await?;
+    Ok(EditSource {
+        video_origin: media::ceil_to_grid(requested_start, frame_dur),
+        audio_origin: requested_start,
+        frame_dur,
+        path,
+    })
 }
 
-// ── preview_clip: re-encode the section to exact In/Out, serve as preview ──
+// ── preview_clip: exact In/Out render from the editing copy ───────────────
 
 #[tauri::command]
 async fn preview_clip(
     app: tauri::AppHandle,
-    section_path: String,
-    start_sec: f64,
-    end_sec: f64,
-) -> Result<String, String> {
-    let duration = end_sec - start_sec;
+    edit: EditSource,
+    in_sec: f64,
+    out_sec: f64,
+) -> Result<serde_json::Value, String> {
+    let ffmpeg = sidecar::resolve_sidecar(&app, "ffmpeg");
+    let range = media::clip_range(&ffmpeg, &edit, in_sec, out_sec).await?;
 
-    // Deterministic filename from section path + markers — cached across runs
-    let stem = section_path
-        .strip_suffix(".mp4")
-        .unwrap_or(&section_path);
+    // Cache by exact absolute frame range.
+    let stem = edit.path.strip_suffix(".mp4").unwrap_or(&edit.path);
     let preview_path = format!(
-        "{}_preview_{:.2}_{:.2}.mp4",
-        stem, start_sec, end_sec
+        "{}_preview_{}_{}.mp4",
+        stem,
+        (range.start * 1000.0).round() as u64,
+        (range.end * 1000.0).round() as u64
     );
 
-    // If already rendered with these exact markers, skip ffmpeg
-    if std::path::Path::new(&preview_path).exists() {
-        return serve_video(preview_path);
-    }
-
-    let ffmpeg = sidecar::resolve_sidecar(&app, "ffmpeg");
-
-    // -ss after -i: frame-accurate seek (decodes from start, discards before -ss).
-    // Re-encode (not -c copy) because the downloaded section has sparse keyframes
-    // and can't be trimmed at arbitrary positions without decoding.
-    let status = tokio::process::Command::new(&ffmpeg)
-        .args([
-            "-i",
-            &section_path,
-            "-ss",
-            &format!("{:.3}", start_sec),
-            "-t",
-            &format!("{:.3}", duration),
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-crf",
-            "23",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "128k",
-            "-y",
+    if !std::path::Path::new(&preview_path).exists() {
+        media::cut(
+            &ffmpeg,
+            &edit,
+            range,
             &preview_path,
-        ])
-        .status()
-        .await
-        .map_err(|e| format!("ffmpeg preview failed: {}", e))?;
-
-    if !status.success() {
-        return Err("ffmpeg preview cut failed".to_string());
+            media::EncodeOpts { preset: "ultrafast", crf: "23", audio_bitrate: "128k" },
+            |_| {},
+        )
+        .await?;
     }
 
-    serve_video(preview_path)
+    Ok(serde_json::json!({
+        "url": server::register(&preview_path)?,
+        "start": range.start,
+        "end": range.end,
+        "frames": ((range.end - range.start) / edit.frame_dur).round() as u64,
+    }))
 }
 
-// ── serve_video: local HTTP server so the browser can load the file ────────
+// ── export_clip: exact In/Out at the chosen quality ───────────────────────
+
+#[tauri::command]
+async fn export_clip(
+    app: tauri::AppHandle,
+    video_id: String,
+    url: String,
+    edit: EditSource,
+    in_sec: f64,
+    out_sec: f64,
+    resolution: String,
+    output_path: String,
+) -> Result<String, String> {
+    let ffmpeg = sidecar::resolve_sidecar(&app, "ffmpeg");
+    let range = media::clip_range(&ffmpeg, &edit, in_sec, out_sec).await?;
+
+    // Same quality as the editing copy: cut straight from it.
+    let source = if resolution == EDIT_RESOLUTION {
+        edit.clone()
+    } else {
+        let videos_dir = cache_subdir(&app, "videos")?;
+        let start_sec = (range.start - EXPORT_PAD_SECS).max(0.0).floor() as u64;
+        let end_sec = (range.end + EXPORT_PAD_SECS).ceil() as u64;
+        let path = Downloader::fetch_section(
+            &app,
+            &videos_dir.to_string_lossy(),
+            &video_id,
+            &url,
+            start_sec,
+            end_sec,
+            &resolution,
+        )
+        .await
+        .map_err(|e| format!("Download failed: {e}"))?;
+        section_source(&app, path, start_sec as f64).await?
+    };
+
+    let _ = app.emit("export-progress", ExportProgress { percent: 0.0, status: "encoding".into() });
+
+    let app_c = app.clone();
+    let result = media::cut(
+        &ffmpeg,
+        &source,
+        range,
+        &output_path,
+        media::EncodeOpts { preset: "medium", crf: "18", audio_bitrate: "192k" },
+        move |pct| {
+            let _ = app_c.emit("export-progress", ExportProgress { percent: pct, status: "encoding".into() });
+        },
+    )
+    .await;
+
+    match result {
+        Ok(()) => {
+            let _ = app.emit("export-progress", ExportProgress { percent: 100.0, status: "complete".into() });
+            Ok(output_path)
+        }
+        Err(e) => {
+            let _ = app.emit("export-progress", ExportProgress { percent: 0.0, status: "error".into() });
+            Err(e)
+        }
+    }
+}
+
+// ── serve_video: stream a local file to the webview ───────────────────────
 
 #[tauri::command]
 fn serve_video(path: String) -> Result<String, String> {
-    let listener =
-        TcpListener::bind("127.0.0.1:0").map_err(|e| format!("bind: {}", e))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| format!("addr: {}", e))?
-        .port();
-    let file_size = std::fs::metadata(&path)
-        .map_err(|e| format!("stat: {}", e))?
-        .len();
-
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let mut stream = match stream {
-                Ok(s) => s,
-                Err(_) => break,
-            };
-            let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf);
-            let req = String::from_utf8_lossy(&buf);
-
-            let range_start = req
-                .lines()
-                .find(|l| l.to_lowercase().starts_with("range:"))
-                .and_then(|l| l.split("bytes=").nth(1))
-                .and_then(|r| r.split('-').next())
-                .and_then(|s| s.trim().parse::<u64>().ok());
-
-            match range_start {
-                Some(start) => {
-                    let end = file_size - 1;
-                    let clen = file_size - start;
-                    let resp = format!(
-                        "HTTP/1.1 206 Partial Content\r\n\
-                         Content-Type: video/mp4\r\n\
-                         Content-Range: bytes {}-{}/{}\r\n\
-                         Content-Length: {}\r\n\
-                         Accept-Ranges: bytes\r\n\r\n",
-                        start, end, file_size, clen
-                    );
-                    let _ = stream.write_all(resp.as_bytes());
-                    if let Ok(mut f) = std::fs::File::open(&path) {
-                        let _ = f.seek(SeekFrom::Start(start));
-                        let mut remaining = clen as usize;
-                        let mut buf = [0u8; 8192];
-                        while remaining > 0 {
-                            let cap = remaining.min(8192);
-                            let n = f.read(&mut buf[..cap]).unwrap_or(0);
-                            if n == 0 {
-                                break;
-                            }
-                            let _ = stream.write_all(&buf[..n]);
-                            remaining -= n;
-                        }
-                    }
-                }
-                None => {
-                    let resp = format!(
-                        "HTTP/1.1 200 OK\r\n\
-                         Content-Type: video/mp4\r\n\
-                         Content-Length: {}\r\n\
-                         Accept-Ranges: bytes\r\n\r\n",
-                        file_size
-                    );
-                    let _ = stream.write_all(resp.as_bytes());
-                    if let Ok(mut f) = std::fs::File::open(&path) {
-                        let _ = std::io::copy(&mut f, &mut stream);
-                    }
-                }
-            }
-        }
-    });
-
-    Ok(format!("http://127.0.0.1:{}", port))
+    server::register(&path)
 }
 
-// ── helpers ────────────────────────────────────────────────────────────────
+// ── cache housekeeping ────────────────────────────────────────────────────
 
-async fn fetch_video_title(app: &tauri::AppHandle, url: &str) -> String {
-    let ytdlp = sidecar::resolve_sidecar(app, "yt-dlp");
-    match tokio::process::Command::new(&ytdlp)
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", std::env::var("HOME").unwrap_or_default())
-        .env("USER", std::env::var("USER").unwrap_or_default())
-        .env("LANG", std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".into()))
-        .args(["--print", "title", "--no-playlist", url])
-        .output()
-        .await
-    {
-        Ok(out) if out.status.success() => {
-            String::from_utf8_lossy(&out.stdout).trim().to_string()
+/// Delete cached downloads/renders older than `max_age`. Models are kept.
+fn prune_cache(cache: &std::path::Path, max_age: std::time::Duration) {
+    let now = std::time::SystemTime::now();
+    for dir in ["videos", "audio", "transcripts", "exports"] {
+        let Ok(entries) = std::fs::read_dir(cache.join(dir)) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let old = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| now.duration_since(t).ok())
+                .map(|age| age > max_age)
+                .unwrap_or(false);
+            if old && path.is_file() {
+                let _ = std::fs::remove_file(&path);
+            }
         }
-        _ => String::new(),
     }
 }
 
@@ -853,13 +671,20 @@ pub fn run() {
                 "[better-clipper] resource_dir = {:?}",
                 app.path().resource_dir().unwrap_or_default()
             );
+            if let Ok(cache) = app.path().app_cache_dir() {
+                std::thread::spawn(move || {
+                    prune_cache(&cache, std::time::Duration::from_secs(3 * 24 * 3600))
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             process_video,
+            transcribe_video,
             read_transcript,
             download_section,
-            export_slice,
+            load_full_video,
+            export_clip,
             preview_clip,
             serve_video
         ])

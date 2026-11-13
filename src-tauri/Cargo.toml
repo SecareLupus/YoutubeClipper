@@ -1,6 +1,6 @@
 [package]
 name = "better-clipper"
-version = "0.1.0"
+version = "0.2.2"
 description = "Video Snippet Clipper"
 authors = ["you"]
 edition = "2021"
@@ -24,3 +24,6 @@ tokio = { version = "1", features = ["process", "io-util", "fs"] }
 tempfile = "3"
 futures-util = "0.3"
 which = "7"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

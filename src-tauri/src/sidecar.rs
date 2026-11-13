@@ -6,9 +6,9 @@ use tauri::Manager;
 /// Resolve a sidecar binary path.
 ///
 /// In dev builds: returns the binary name directly (relies on PATH).
-/// In production: checks the host's PATH first, then falls back to
-/// bundled resources. This lets the user's system-provided yt-dlp
-/// and ffmpeg take priority over bundled versions.
+/// In production: prefers the bundled (pinned) resource, then falls back to
+/// the host's PATH. Bundled binaries are deterministic, so a stale system
+/// yt-dlp can't silently override a freshly-bundled one.
 pub fn resolve_sidecar(app: &AppHandle, name: &str) -> String {
     #[cfg(debug_assertions)]
     {
@@ -18,13 +18,9 @@ pub fn resolve_sidecar(app: &AppHandle, name: &str) -> String {
 
     #[cfg(not(debug_assertions))]
     {
-        // Check host PATH first — user's system version is always preferred
-        if let Ok(path) = which::which(name) {
-            let s = path.to_string_lossy().to_string();
-            eprintln!("[better-clipper] resolve_sidecar({name}): found on PATH -> {s}");
-            return s;
-        }
-
+        // Prefer the bundled (pinned, known-good) binary so the app's behavior
+        // is deterministic regardless of what's on the host PATH. Fall back to
+        // the host PATH so users without a bundled copy still work.
         let resource_dir = app.path().resource_dir().unwrap_or_default();
         let binaries_dir = resource_dir.join("binaries");
         let triple_name = format!("{}-{}", name, env!("TAURI_ENV_TARGET_TRIPLE"));
@@ -34,10 +30,12 @@ pub fn resolve_sidecar(app: &AppHandle, name: &str) -> String {
             env!("TAURI_ENV_TARGET_TRIPLE")
         );
 
+        let exe = std::env::consts::EXE_SUFFIX; // ".exe" on Windows, "" elsewhere
         let candidates: &[std::path::PathBuf] = &[
-            resource_dir.join(name),
+            resource_dir.join(format!("{name}{exe}")),
+            binaries_dir.join(format!("{name}{exe}")),
+            binaries_dir.join(format!("{triple_name}{exe}")),
             binaries_dir.join(name),
-            binaries_dir.join(&triple_name),
         ];
 
         for candidate in candidates {
@@ -50,6 +48,13 @@ pub fn resolve_sidecar(app: &AppHandle, name: &str) -> String {
             if exists {
                 return candidate.to_string_lossy().to_string();
             }
+        }
+
+        // Fall back to host PATH if no bundled binary is present.
+        if let Ok(path) = which::which(name) {
+            let s = path.to_string_lossy().to_string();
+            eprintln!("[better-clipper] resolve_sidecar({name}): not bundled, using PATH -> {s}");
+            return s;
         }
 
         let fallback = binaries_dir.join(name);

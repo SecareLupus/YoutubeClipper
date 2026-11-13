@@ -8,6 +8,7 @@ use crate::sidecar::resolve_sidecar;
 
 const MODEL_URL_BASE: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
 const MODEL_NAME: &str = "ggml-tiny.bin";
+const MIN_MODEL_BYTES: u64 = 30 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelDownloadProgress {
@@ -66,7 +67,17 @@ impl Transcriber {
         let model_path = models_dir.join(MODEL_NAME);
         let model_path_str = model_path.to_string_lossy().to_string();
 
-        if model_path.exists() {
+        // A truncated download or saved error page would otherwise be treated
+        // as a valid model forever. ggml-tiny.bin is ~75 MB.
+        let valid = std::fs::metadata(&model_path)
+            .map(|m| m.len() > MIN_MODEL_BYTES)
+            .unwrap_or(false);
+        if model_path.exists() && !valid {
+            eprintln!("[better-clipper] whisper model at {model_path_str} is invalid; re-downloading");
+            let _ = std::fs::remove_file(&model_path);
+        }
+
+        if valid {
             let _ = app.emit(
                 "model-download-progress",
                 ModelDownloadProgress {
@@ -81,11 +92,14 @@ impl Transcriber {
 
         let response = reqwest::get(&url)
             .await
+            .and_then(|r| r.error_for_status())
             .map_err(|e| format!("Failed to fetch model: {}", e))?;
 
         let total_size = response.content_length().unwrap_or(0);
         let mut downloaded: u64 = 0;
-        let mut file = tokio::fs::File::create(&model_path)
+        // Download to a temp name and rename when complete.
+        let part_path = models_dir.join(format!("{MODEL_NAME}.part"));
+        let mut file = tokio::fs::File::create(&part_path)
             .await
             .map_err(|e| format!("Failed to create model file: {}", e))?;
 
@@ -110,6 +124,19 @@ impl Transcriber {
                 );
             }
         }
+
+        tokio::io::AsyncWriteExt::flush(&mut file)
+            .await
+            .map_err(|e| format!("Write error: {}", e))?;
+        drop(file);
+        if downloaded <= MIN_MODEL_BYTES || (total_size > 0 && downloaded != total_size) {
+            let _ = std::fs::remove_file(&part_path);
+            return Err(format!(
+                "Model download incomplete ({downloaded} of {total_size} bytes)"
+            ));
+        }
+        std::fs::rename(&part_path, &model_path)
+            .map_err(|e| format!("Failed to move model into place: {}", e))?;
 
         let _ = app.emit(
             "model-download-progress",
@@ -147,12 +174,17 @@ impl Transcriber {
             .await
             .map_err(|e| format!("Failed to spawn whisper-cli: {}", e))?;
 
-        if output.status.success() {
-            let vtt_path = format!("{}.vtt", output_prefix);
+        let vtt_path = format!("{}.vtt", output_prefix);
+        if output.status.success() && std::path::Path::new(&vtt_path).exists() {
             Ok(vtt_path)
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(format!("whisper-cli transcription failed: {}", stderr))
+            let tail: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).collect();
+            Err(format!(
+                "whisper-cli failed (exit {:?}): {}",
+                output.status.code(),
+                tail[tail.len().saturating_sub(5)..].join(" | ")
+            ))
         }
     }
 }
