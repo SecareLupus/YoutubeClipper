@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::sync::Arc;
 use tauri::Emitter;
 use tauri::Manager;
 
@@ -149,11 +150,16 @@ async fn transcribe_video(
 
     emit_pipeline(&app, &video_id, "transcribe", "Transcribing with whisper...", 55.0);
     let output_prefix = transcripts_dir.join(&video_id).to_string_lossy().to_string();
+    let (app_c, vid) = (app.clone(), video_id.clone());
     let vtt_path = transcriber::Transcriber::transcribe(
         &app,
         &model_path,
         &wav_path.to_string_lossy(),
         &output_prefix,
+        Arc::new(move |pct| {
+            let msg = format!("Transcribing with whisper... {pct:.0}%");
+            emit_pipeline(&app_c, &vid, "transcribe", &msg, 55.0 + pct * 0.44);
+        }),
     )
     .await
     .map_err(|e| format!("Transcription failed: {e}"))?;
@@ -485,6 +491,7 @@ async fn download_section(
         start_sec,
         end_sec,
         EDIT_RESOLUTION,
+        download_progress(&app),
     )
     .await
     .map_err(|e| format!("Section download failed: {e}"))?;
@@ -506,10 +513,19 @@ async fn load_full_video(
         &video_id,
         &url,
         EDIT_RESOLUTION,
+        download_progress(&app),
     )
     .await
     .map_err(|e| format!("Video download failed: {e}"))?;
     section_source(&app, path, 0.0).await
+}
+
+/// Progress for the editing-copy downloads (drives the top progress bar).
+fn download_progress(app: &tauri::AppHandle) -> downloader::ProgressFn {
+    let app = app.clone();
+    Arc::new(move |pct| {
+        let _ = app.emit("download-progress", serde_json::json!({ "percent": pct }));
+    })
 }
 
 async fn section_source(app: &tauri::AppHandle, path: String, requested_start: f64) -> Result<EditSource, String> {
@@ -551,7 +567,12 @@ async fn preview_clip(
             range,
             &preview_path,
             media::EncodeOpts { preset: "ultrafast", crf: "23", audio_bitrate: "128k" },
-            |_| {},
+            {
+                let app = app.clone();
+                move |pct| {
+                    let _ = app.emit("preview-progress", serde_json::json!({ "percent": pct }));
+                }
+            },
         )
         .await?;
     }
@@ -580,10 +601,21 @@ async fn export_clip(
     let ffmpeg = sidecar::resolve_sidecar(&app, "ffmpeg");
     let range = media::clip_range(&ffmpeg, &edit, in_sec, out_sec).await?;
 
-    // Same quality as the editing copy: cut straight from it.
-    let source = if resolution == EDIT_RESOLUTION {
+    let emit = {
+        let app = app.clone();
+        move |percent: f64, status: &str| {
+            let _ = app.emit("export-progress", ExportProgress { percent, status: status.into() });
+        }
+    };
+
+    // Same quality as the editing copy: cut straight from it, and encoding is
+    // the whole bar. Otherwise download first (0–60%), then encode (60–100%).
+    let needs_download = resolution != EDIT_RESOLUTION;
+    let (enc_base, enc_span) = if needs_download { (60.0, 40.0) } else { (0.0, 100.0) };
+    let source = if !needs_download {
         edit.clone()
     } else {
+        emit(0.0, "downloading");
         let videos_dir = cache_subdir(&app, "videos")?;
         let start_sec = (range.start - EXPORT_PAD_SECS).max(0.0).floor() as u64;
         let end_sec = (range.end + EXPORT_PAD_SECS).ceil() as u64;
@@ -595,34 +627,41 @@ async fn export_clip(
             start_sec,
             end_sec,
             &resolution,
+            {
+                let emit = emit.clone();
+                Arc::new(move |pct| emit(pct * 0.6, "downloading"))
+            },
         )
         .await
-        .map_err(|e| format!("Download failed: {e}"))?;
+        .map_err(|e| {
+            emit(0.0, "error");
+            format!("Download failed: {e}")
+        })?;
         section_source(&app, path, start_sec as f64).await?
     };
 
-    let _ = app.emit("export-progress", ExportProgress { percent: 0.0, status: "encoding".into() });
+    emit(enc_base, "encoding");
 
-    let app_c = app.clone();
     let result = media::cut(
         &ffmpeg,
         &source,
         range,
         &output_path,
         media::EncodeOpts { preset: "medium", crf: "18", audio_bitrate: "192k" },
-        move |pct| {
-            let _ = app_c.emit("export-progress", ExportProgress { percent: pct, status: "encoding".into() });
+        {
+            let emit = emit.clone();
+            move |pct| emit(enc_base + pct * enc_span / 100.0, "encoding")
         },
     )
     .await;
 
     match result {
         Ok(()) => {
-            let _ = app.emit("export-progress", ExportProgress { percent: 100.0, status: "complete".into() });
+            emit(100.0, "complete");
             Ok(output_path)
         }
         Err(e) => {
-            let _ = app.emit("export-progress", ExportProgress { percent: 0.0, status: "error".into() });
+            emit(0.0, "error");
             Err(e)
         }
     }

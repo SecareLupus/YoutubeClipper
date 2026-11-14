@@ -1,17 +1,8 @@
-use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tauri::AppHandle;
 use tauri::Emitter;
 
 use crate::sidecar::resolve_sidecar;
-
-#[derive(Debug, Clone, Serialize)]
-pub struct DownloadProgress {
-    pub video_id: String,
-    pub resolution: String,
-    pub percent: f64,
-    pub status: String,
-}
 
 /// Basic video metadata from `yt-dlp -J`, plus the caption track we picked.
 pub struct VideoInfo {
@@ -44,6 +35,9 @@ fn format_selector(resolution: &str) -> String {
         max_height(resolution)
     )
 }
+
+/// Progress callback receiving an overall percentage (0–100).
+pub type ProgressFn = std::sync::Arc<dyn Fn(f64) + Send + Sync>;
 
 pub struct Downloader;
 
@@ -117,7 +111,7 @@ impl Downloader {
         ];
         add_ffmpeg_location(app, &mut args);
 
-        run_ytdlp(app, &args, |_| {}).await?;
+        run_ytdlp(app, &args, None, std::sync::Arc::new(|_| {})).await?;
 
         let expected = format!("{}/{}.{}.vtt", output_dir, video_id, lang);
         if Path::new(&expected).exists() {
@@ -132,6 +126,7 @@ impl Downloader {
     /// Download a time-bounded section of the video at `resolution`.
     /// `start_sec`/`end_sec` are whole seconds of absolute video time; integer
     /// starts land on the frame grid of 24/25/30/50/60fps sources.
+    /// `on_progress` receives overall 0–100.
     pub async fn fetch_section(
         app: &AppHandle,
         output_dir: &str,
@@ -140,6 +135,7 @@ impl Downloader {
         start_sec: u64,
         end_sec: u64,
         resolution: &str,
+        on_progress: ProgressFn,
     ) -> Result<String, String> {
         let stem = format!(
             "{}/{}_section_{}_{}_{}",
@@ -149,7 +145,10 @@ impl Downloader {
             "--download-sections".into(),
             format!("*{}-{}", start_sec, end_sec),
         ];
-        download_video(app, video_id, url, resolution, &stem, args).await
+        // Section downloads go through ffmpeg, which reports elapsed output
+        // time rather than percentages.
+        let secs = end_sec.saturating_sub(start_sec) as f64;
+        download_video(app, url, resolution, &stem, args, Some(secs), on_progress).await
     }
 
     /// Download the full video at `resolution` (used for manual trimming).
@@ -159,9 +158,10 @@ impl Downloader {
         video_id: &str,
         url: &str,
         resolution: &str,
+        on_progress: ProgressFn,
     ) -> Result<String, String> {
         let stem = format!("{}/{}_full_{}", output_dir, video_id, resolution);
-        download_video(app, video_id, url, resolution, &stem, Vec::new()).await
+        download_video(app, url, resolution, &stem, Vec::new(), None, on_progress).await
     }
 
     /// Download only the best audio stream (for whisper transcription).
@@ -189,7 +189,7 @@ impl Downloader {
 
         let app_c = app.clone();
         let vid = video_id.to_string();
-        run_ytdlp(app, &args, move |pct| {
+        let progress: ProgressFn = std::sync::Arc::new(move |pct| {
             emit_pipeline(
                 &app_c,
                 &vid,
@@ -197,8 +197,8 @@ impl Downloader {
                 &format!("Downloading audio... {:.0}%", pct),
                 5.0 + pct * 0.25,
             );
-        })
-        .await?;
+        });
+        run_ytdlp(app, &args, None, progress).await?;
 
         find_with_prefix(output_dir, &prefix, "")
             .filter(finished)
@@ -211,18 +211,19 @@ impl Downloader {
 /// different quality never collides with a cached one).
 async fn download_video(
     app: &AppHandle,
-    video_id: &str,
     url: &str,
     resolution: &str,
     stem: &str,
     extra_args: Vec<String>,
+    section_secs: Option<f64>,
+    on_progress: ProgressFn,
 ) -> Result<String, String> {
     let output_path = format!("{stem}.mp4");
     if Path::new(&output_path).exists() {
+        on_progress(100.0);
         return Ok(output_path);
     }
-
-    emit_download(app, video_id, resolution, 0.0, "downloading");
+    on_progress(0.0);
 
     let mut args: Vec<String> = vec!["-f".into(), format_selector(resolution)];
     args.extend(extra_args);
@@ -237,27 +238,12 @@ async fn download_video(
     ]);
     add_ffmpeg_location(app, &mut args);
 
-    let app_c = app.clone();
-    let vid = video_id.to_string();
-    let res = resolution.to_string();
-    let result = run_ytdlp(app, &args, move |pct| {
-        emit_download(&app_c, &vid, &res, pct, "downloading");
-    })
-    .await;
-
-    match result {
-        Ok(()) if Path::new(&output_path).exists() => {
-            emit_download(app, video_id, resolution, 100.0, "complete");
-            Ok(output_path)
-        }
-        Ok(()) => {
-            emit_download(app, video_id, resolution, 0.0, "error");
-            Err(format!("yt-dlp finished but {output_path} was not created"))
-        }
-        Err(e) => {
-            emit_download(app, video_id, resolution, 0.0, "error");
-            Err(e)
-        }
+    run_ytdlp(app, &args, section_secs, on_progress.clone()).await?;
+    if Path::new(&output_path).exists() {
+        on_progress(100.0);
+        Ok(output_path)
+    } else {
+        Err(format!("yt-dlp finished but {output_path} was not created"))
     }
 }
 
@@ -361,15 +347,126 @@ fn summarize_failure(lines: &[String], code: Option<i32>) -> String {
     )
 }
 
-/// Run yt-dlp, streaming both stdout and stderr. `on_progress` receives
-/// download percentages parsed from `[download] NN.N%` lines (yt-dlp prints
-/// these on stdout). On failure, returns yt-dlp's ERROR lines.
-async fn run_ytdlp<F>(app: &AppHandle, args: &[String], on_progress: F) -> Result<(), String>
-where
-    F: Fn(f64) + Send + Sync + 'static,
-{
-    use tokio::io::AsyncBufReadExt;
+/// Turns yt-dlp / ffmpeg output lines into one monotonic overall percentage.
+///
+/// - Normal downloads print `[download]  NN.N%` per format; a merged
+///   video+audio download runs 0→100 once per format, so each format
+///   (announced by `[download] Destination:`) gets a slice of the bar.
+/// - `--download-sections` downloads run through ffmpeg, which prints only
+///   `time=HH:MM:SS.xx` (relative to the section start, negative while it
+///   pre-rolls); progress is that time over the section length.
+pub struct ProgressTracker {
+    section_secs: Option<f64>,
+    formats: usize,
+    phase: usize,
+    last: f64,
+}
 
+impl ProgressTracker {
+    pub fn new(section_secs: Option<f64>) -> Self {
+        Self { section_secs, formats: 1, phase: 0, last: -1.0 }
+    }
+
+    /// Feed one output line; returns a new percentage when it advanced.
+    pub fn feed(&mut self, line: &str) -> Option<f64> {
+        let pct = if let Some(rest) = line.split("format(s):").nth(1) {
+            // "[info] ID: Downloading 1 format(s): 137+140"
+            self.formats = rest.trim().split('+').count().max(1);
+            return None;
+        } else if line.starts_with("[download] Destination:") {
+            self.phase += 1;
+            return None;
+        } else if line.starts_with("[Merger]") {
+            99.0
+        } else if let Some(secs) = self.section_secs {
+            let t = parse_ffmpeg_time(line)?;
+            if secs <= 0.0 {
+                return None;
+            }
+            (t.max(0.0) / secs * 100.0).min(99.0)
+        } else {
+            let p = parse_download_percent(line)?.clamp(0.0, 100.0);
+            // Video carries most of the bytes in a video+audio download.
+            let weights: Vec<f64> = match self.formats {
+                1 => vec![1.0],
+                2 => vec![0.85, 0.15],
+                n => vec![1.0 / n as f64; n],
+            };
+            let idx = self.phase.saturating_sub(1).min(weights.len() - 1);
+            let done: f64 = weights[..idx].iter().sum();
+            ((done + weights[idx] * p / 100.0) * 100.0).min(99.0)
+        };
+        // Monotonic, and skip sub-half-percent changes to limit event spam.
+        if pct >= self.last + 0.5 || (pct >= 99.0 && self.last < 99.0) {
+            self.last = pct;
+            Some(pct)
+        } else {
+            None
+        }
+    }
+}
+
+/// Parse ffmpeg's "... time=HH:MM:SS.xx ..." (may be negative) into seconds.
+pub fn parse_ffmpeg_time(line: &str) -> Option<f64> {
+    let idx = line.find("time=")?;
+    let s = line[idx + 5..].split_whitespace().next()?;
+    let (neg, s) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s),
+    };
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let h: f64 = parts[0].parse().ok()?;
+    let m: f64 = parts[1].parse().ok()?;
+    let sec: f64 = parts[2].parse().ok()?;
+    let t = h * 3600.0 + m * 60.0 + sec;
+    Some(if neg { -t } else { t })
+}
+
+/// Read `reader`, calling `f` for every line terminated by `\n` OR `\r`
+/// (ffmpeg rewrites its stats line with `\r`, so `lines()` would only see
+/// it once the process exits).
+pub async fn for_each_line<R, F>(reader: R, mut f: F)
+where
+    R: tokio::io::AsyncRead + Unpin,
+    F: FnMut(&str),
+{
+    use tokio::io::AsyncReadExt;
+    let mut reader = reader;
+    let mut buf = [0u8; 8192];
+    let mut pending: Vec<u8> = Vec::new();
+    loop {
+        let n = match reader.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        for &b in &buf[..n] {
+            if b == b'\n' || b == b'\r' {
+                if !pending.is_empty() {
+                    f(String::from_utf8_lossy(&pending).trim());
+                    pending.clear();
+                }
+            } else {
+                pending.push(b);
+            }
+        }
+    }
+    if !pending.is_empty() {
+        f(String::from_utf8_lossy(&pending).trim());
+    }
+}
+
+/// Run yt-dlp, streaming both stdout and stderr through a ProgressTracker
+/// (`section_secs` = Some(len) for `--download-sections` runs). On failure,
+/// returns yt-dlp's ERROR lines.
+async fn run_ytdlp(
+    app: &AppHandle,
+    args: &[String],
+    section_secs: Option<f64>,
+    on_progress: ProgressFn,
+) -> Result<(), String> {
     eprintln!("[better-clipper] yt-dlp {}", args.join(" "));
     let mut child = ytdlp_command(app)
         .args(args)
@@ -381,32 +478,36 @@ where
     let stdout = child.stdout.take().ok_or("Failed to capture yt-dlp stdout")?;
     let stderr = child.stderr.take().ok_or("Failed to capture yt-dlp stderr")?;
 
-    let lines = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
-    let on_progress = std::sync::Arc::new(on_progress);
+    let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let tracker = std::sync::Arc::new(std::sync::Mutex::new(ProgressTracker::new(section_secs)));
 
     let readers: Vec<Box<dyn tokio::io::AsyncRead + Unpin + Send>> =
         vec![Box::new(stdout), Box::new(stderr)];
     let mut tasks = Vec::new();
     for reader in readers {
         let lines = lines.clone();
+        let tracker = tracker.clone();
         let on_progress = on_progress.clone();
         tasks.push(tokio::spawn(async move {
-            let mut reader = tokio::io::BufReader::new(reader).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                let line = line.trim().to_string();
-                if let Some(pct) = parse_download_percent(&line) {
-                    on_progress(pct);
-                    continue;
-                }
+            for_each_line(reader, |line| {
                 if line.is_empty() {
-                    continue;
+                    return;
                 }
-                let mut l = lines.lock().await;
-                l.push(line);
+                let advanced = tracker.lock().unwrap().feed(line);
+                if let Some(pct) = advanced {
+                    on_progress(pct);
+                }
+                // Keep diagnostics, but not the per-tick progress lines.
+                if line.starts_with("frame=") || parse_download_percent(line).is_some() {
+                    return;
+                }
+                let mut l = lines.lock().unwrap();
+                l.push(line.to_string());
                 if l.len() > 200 {
                     l.remove(0);
                 }
-            }
+            })
+            .await;
         }));
     }
 
@@ -421,7 +522,7 @@ where
     if status.success() {
         Ok(())
     } else {
-        let l = lines.lock().await;
+        let l = lines.lock().unwrap();
         eprintln!("[better-clipper] yt-dlp failed; last output:");
         for line in l.iter().rev().take(20).rev() {
             eprintln!("[better-clipper]   {line}");
@@ -461,18 +562,6 @@ pub fn emit_pipeline(app: &AppHandle, video_id: &str, stage: &str, message: &str
             stage: stage.to_string(),
             message: message.to_string(),
             percent,
-        },
-    );
-}
-
-fn emit_download(app: &AppHandle, video_id: &str, resolution: &str, percent: f64, status: &str) {
-    let _ = app.emit(
-        "download-progress",
-        DownloadProgress {
-            video_id: video_id.to_string(),
-            resolution: resolution.to_string(),
-            percent,
-            status: status.to_string(),
         },
     );
 }
@@ -542,6 +631,57 @@ mod tests {
             pick_english_track(&s(&["ko"]), &s(&["ko-orig", "es"])),
             None
         );
+    }
+
+    /// Live check: real yt-dlp process -> for_each_line -> ProgressTracker.
+    /// BC_PROG_ARGS = yt-dlp args (space-separated), BC_PROG_SECS = section len.
+    #[tokio::test]
+    #[ignore]
+    async fn live_progress() {
+        let args: Vec<String> = std::env::var("BC_PROG_ARGS").unwrap()
+            .split(' ').map(String::from).collect();
+        let secs = std::env::var("BC_PROG_SECS").ok().and_then(|s| s.parse().ok());
+        let mut child = tokio::process::Command::new("yt-dlp").args(&args)
+            .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
+            .spawn().unwrap();
+        let t = std::sync::Arc::new(std::sync::Mutex::new(ProgressTracker::new(secs)));
+        let start = std::time::Instant::now();
+        let mut tasks = Vec::new();
+        let readers: Vec<Box<dyn tokio::io::AsyncRead + Unpin + Send>> =
+            vec![Box::new(child.stdout.take().unwrap()), Box::new(child.stderr.take().unwrap())];
+        for r in readers {
+            let t = t.clone();
+            tasks.push(tokio::spawn(async move {
+                for_each_line(r, |l| {
+                    if let Some(p) = t.lock().unwrap().feed(l) {
+                        println!("{:6.2}s {p:5.1}%", start.elapsed().as_secs_f64());
+                    }
+                }).await;
+            }));
+        }
+        assert!(child.wait().await.unwrap().success());
+        for x in tasks { x.await.unwrap(); }
+    }
+
+    #[test]
+    fn tracks_section_progress_from_ffmpeg_time() {
+        let mut t = ProgressTracker::new(Some(20.0));
+        assert_eq!(t.feed("frame=   32 fps=0.0 q=-1.0 size=0KiB time=-00:00:04.16 bitrate=N/A"), Some(0.0));
+        assert_eq!(t.feed("frame=  158 fps= 53 q=-1.0 size=768KiB time=00:00:05.00 bitrate=1"), Some(25.0));
+        assert_eq!(t.feed("frame=  158 fps= 53 q=-1.0 size=768KiB time=00:00:05.02 bitrate=1"), None);
+        assert_eq!(t.feed("frame=  900 time=00:00:30.00"), Some(99.0));
+    }
+
+    #[test]
+    fn tracks_merged_download_phases() {
+        let mut t = ProgressTracker::new(None);
+        t.feed("[info] abc: Downloading 1 format(s): 137+140");
+        t.feed("[download] Destination: x.f137.mp4");
+        assert_eq!(t.feed("[download]  50.0% of 10MiB"), Some(42.5));
+        assert_eq!(t.feed("[download] 100.0% of 10MiB"), Some(85.0));
+        t.feed("[download] Destination: x.f140.m4a");
+        assert_eq!(t.feed("[download]   0.0% of 1MiB"), None); // no going backwards
+        assert_eq!(t.feed("[download] 100.0% of 1MiB"), Some(99.0));
     }
 
     #[test]

@@ -152,37 +152,65 @@ impl Transcriber {
     /// Run whisper-cli on a 16kHz mono WAV to produce a VTT transcript.
     ///
     /// Returns the path to the generated `.vtt` file.
+    /// `on_progress` receives 0–100 (whisper reports after each 30s window).
     pub async fn transcribe(
         app: &AppHandle,
         model_path: &str,
         wav_path: &str,
         output_prefix: &str,
+        on_progress: crate::downloader::ProgressFn,
     ) -> Result<String, String> {
         let whisper = resolve_sidecar(app, "whisper-cli");
 
-        let output = app
-            .shell()
-            .command(&whisper)
+        let mut child = tokio::process::Command::new(&whisper)
             .args([
                 "-m", model_path,
                 "-f", wav_path,
                 "-ovtt",
                 "-of", output_prefix,
                 "-l", "auto",
+                "-pp", // "whisper_print_progress_callback: progress = NN%" on stderr
             ])
-            .output()
-            .await
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
             .map_err(|e| format!("Failed to spawn whisper-cli: {}", e))?;
 
+        let stderr = child.stderr.take().ok_or("Failed to capture whisper-cli stderr")?;
+        let reader = tokio::spawn(async move {
+            let mut tail: Vec<String> = Vec::new();
+            crate::downloader::for_each_line(stderr, |line| {
+                if let Some(pct) = line
+                    .split("progress =")
+                    .nth(1)
+                    .and_then(|r| r.trim().trim_end_matches('%').trim().parse::<f64>().ok())
+                {
+                    on_progress(pct.clamp(0.0, 100.0));
+                } else if !line.is_empty() {
+                    tail.push(line.to_string());
+                    if tail.len() > 20 {
+                        tail.remove(0);
+                    }
+                }
+            })
+            .await;
+            tail
+        });
+
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| format!("whisper-cli process error: {}", e))?;
+        let tail = reader.await.unwrap_or_default();
+
         let vtt_path = format!("{}.vtt", output_prefix);
-        if output.status.success() && std::path::Path::new(&vtt_path).exists() {
+        if status.success() && std::path::Path::new(&vtt_path).exists() {
             Ok(vtt_path)
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let tail: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).collect();
             Err(format!(
                 "whisper-cli failed (exit {:?}): {}",
-                output.status.code(),
+                status.code(),
                 tail[tail.len().saturating_sub(5)..].join(" | ")
             ))
         }

@@ -133,7 +133,7 @@ fn handle(mut stream: TcpStream) -> std::io::Result<()> {
     let len = if size == 0 { 0 } else { end - start + 1 };
 
     let mut head = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: video/mp4\r\nAccept-Ranges: bytes\r\nContent-Length: {len}\r\nConnection: close\r\n"
+        "HTTP/1.1 {status}\r\nContent-Type: video/mp4\r\nAccept-Ranges: bytes\r\nContent-Length: {len}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n"
     );
     if status.starts_with("206") {
         head.push_str(&format!("Content-Range: bytes {start}-{end}/{size}\r\n"));
@@ -168,6 +168,19 @@ fn respond_empty(stream: &mut TcpStream, status: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::parse_range;
+
+    /// Manual harness: serve $BC_SERVE_FILE for $BC_SERVE_SECS seconds and
+    /// print the URL (used to test playback in a real WebKitGTK webview).
+    #[test]
+    #[ignore]
+    fn serve_for_harness() {
+        let path = std::env::var("BC_SERVE_FILE").unwrap();
+        let secs: u64 = std::env::var("BC_SERVE_SECS").unwrap_or("60".into()).parse().unwrap();
+        println!("URL {}", super::register(&path).unwrap());
+        use std::io::Write;
+        std::io::stdout().flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(secs));
+    }
 
     #[test]
     fn ranges() {

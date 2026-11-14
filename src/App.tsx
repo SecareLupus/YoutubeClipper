@@ -10,13 +10,6 @@ interface PipelineProgress {
   percent: number;
 }
 
-interface DownloadProgress {
-  video_id: string;
-  resolution: string;
-  percent: number;
-  status: string;
-}
-
 interface ExportProgress {
   percent: number;
   status: string;
@@ -183,6 +176,8 @@ function App() {
   const [downloadingSection, setDownloadingSection] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
+  const [exportStatus, setExportStatus] = useState("encoding");
+  const [previewProgress, setPreviewProgress] = useState(0);
   // 720p matches the editing copy, so export cuts locally with no re-download.
   const [quality, setQuality] = useState("720p");
   const [previewVideoSrc, setPreviewVideoSrc] = useState<string | null>(null);
@@ -227,7 +222,7 @@ function App() {
       },
     );
 
-    const unlistenDownload = listen<DownloadProgress>(
+    const unlistenDownload = listen<{ percent: number }>(
       "download-progress",
       (event) => {
         setProgress(event.payload.percent);
@@ -238,9 +233,26 @@ function App() {
       "export-progress",
       (event) => {
         setExportProgress(event.payload.percent);
+        setExportStatus(event.payload.status);
         if (event.payload.status === "complete") {
           setExporting(false);
         }
+      },
+    );
+
+    const unlistenPreview = listen<{ percent: number }>(
+      "preview-progress",
+      (event) => setPreviewProgress(event.payload.percent),
+    );
+
+    // First-time whisper model download happens inside the "ensure_model" stage.
+    const unlistenModel = listen<{ percent: number; status: string }>(
+      "model-download-progress",
+      (event) => {
+        if (event.payload.status !== "downloading") return;
+        const pct = event.payload.percent;
+        setStatusMsg(`Downloading whisper model... ${Math.round(pct)}%`);
+        setProgress(40 + pct * 0.15);
       },
     );
 
@@ -248,6 +260,8 @@ function App() {
       unlistenPipeline.then((fn) => fn());
       unlistenDownload.then((fn) => fn());
       unlistenExport.then((fn) => fn());
+      unlistenPreview.then((fn) => fn());
+      unlistenModel.then((fn) => fn());
     };
   }, []);
 
@@ -412,9 +426,26 @@ function App() {
   }, [hasVideo]);
 
   // ── preview clip: cut section with ffmpeg, play in modal ───────────────
+  // The preview is played from an in-memory blob, not streamed over HTTP:
+  // WebKitGTK's HTTP media path stalls ffmpeg/x264-encoded files ~0.1s into
+  // playback ("waiting" forever with the whole file buffered), which looked
+  // like the preview pausing itself. Blob playback doesn't stall, but
+  // occasionally fails to open (MEDIA_ERR_SRC_NOT_SUPPORTED); a fresh object
+  // URL for the same blob fixes that, so retry a few times.
+  const previewBlobRef = useRef<Blob | null>(null);
+  const previewRetriesRef = useRef(0);
+
+  const setPreviewBlobUrl = (blob: Blob | null) => {
+    setPreviewVideoSrc((old) => {
+      if (old?.startsWith("blob:")) URL.revokeObjectURL(old);
+      return blob ? URL.createObjectURL(blob) : null;
+    });
+  };
+
   const handlePreviewClip = async () => {
     if (!edit || generatingPreview) return;
     setGeneratingPreview(true);
+    setPreviewProgress(0);
     setPreviewOpen(true);
     setStatusMsg("Generating preview...");
 
@@ -425,7 +456,12 @@ function App() {
         outSec: outMarker,
       })) as PreviewResult;
       console.log("[preview] preview_clip", p);
-      setPreviewVideoSrc(p.url);
+      const resp = await fetch(p.url);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status} loading preview`);
+      const blob = await resp.blob();
+      previewBlobRef.current = blob;
+      previewRetriesRef.current = 0;
+      setPreviewBlobUrl(blob);
       setStatusMsg(
         `Preview ready: ${p.frames} frames (${formatTimeSec(p.start)}–${formatTimeSec(p.end)})`,
       );
@@ -439,23 +475,55 @@ function App() {
 
   const closePreview = useCallback(() => {
     setPreviewOpen(false);
-    setPreviewVideoSrc(null);
+    previewBlobRef.current = null;
+    setPreviewVideoSrc((old) => {
+      if (old?.startsWith("blob:")) URL.revokeObjectURL(old);
+      return null;
+    });
   }, []);
 
-  // ── autoplay preview once source is loaded ─────────────────────────────
+  // ── autoplay preview once it can play through ──────────────────────────
+  // Either it plays from the start, or it is left paused at the start for
+  // the user to press play — never left frozen in a "playing" state.
   useEffect(() => {
     const vid = previewVideoRef.current;
     if (!vid || !previewVideoSrc) return;
 
+    let stallTimer: number | undefined;
     const play = () => {
-      vid.currentTime = 0;
-      vid.play().catch(() => {});
+      vid.play().catch(() => {
+        /* autoplay refused: stay paused with controls for the user */
+      });
+    };
+    const onWaiting = () => {
+      window.clearTimeout(stallTimer);
+      stallTimer = window.setTimeout(() => {
+        if (vid.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) {
+          vid.pause();
+          vid.currentTime = 0;
+        }
+      }, 1500);
+    };
+    const onPlaying = () => window.clearTimeout(stallTimer);
+    const onError = () => {
+      const blob = previewBlobRef.current;
+      if (blob && previewRetriesRef.current < 3) {
+        previewRetriesRef.current += 1;
+        console.warn("[preview] media error, retrying", vid.error?.code);
+        setPreviewBlobUrl(blob); // new object URL -> new element (keyed by src)
+      }
     };
 
     vid.addEventListener("canplaythrough", play, { once: true });
-
+    vid.addEventListener("waiting", onWaiting);
+    vid.addEventListener("playing", onPlaying);
+    vid.addEventListener("error", onError);
     return () => {
+      window.clearTimeout(stallTimer);
       vid.removeEventListener("canplaythrough", play);
+      vid.removeEventListener("waiting", onWaiting);
+      vid.removeEventListener("playing", onPlaying);
+      vid.removeEventListener("error", onError);
     };
   }, [previewVideoSrc]);
 
@@ -569,7 +637,9 @@ function App() {
     if (!result || downloadingSection) return;
     resetEditor();
     setDownloadingSection(true);
-    setStatusMsg("Downloading section preview...");
+    setProgress(0);
+    setStage("download");
+    setStatusMsg("Downloading section (720p)...");
     try {
       const src = (await invoke("download_section", {
         videoId: result.video_id,
@@ -616,6 +686,7 @@ function App() {
 
     setExporting(true);
     setExportProgress(0);
+    setExportStatus(quality === "720p" ? "encoding" : "downloading");
     setStatusMsg("Exporting clip...");
 
     try {
@@ -946,7 +1017,9 @@ function App() {
             />
           </div>
           <span className="progress-stage">{stage.replace(/_/g, " ")}</span>
-          <span className="progress-text">{statusMsg}</span>
+          <span className="progress-text">
+            {statusMsg} {progress > 0 && progress < 100 ? `(${Math.round(progress)}%)` : ""}
+          </span>
         </div>
       )}
       {!(processing || downloadingSection) && statusMsg && (
@@ -972,7 +1045,9 @@ function App() {
                 <div className="video-controls">
                   {exporting ? (
                     <div className="export-progress-inline">
-                      <span>Encoding...</span>
+                      <span>
+                        {exportStatus === "downloading" ? `Downloading ${quality}...` : "Encoding..."}
+                      </span>
                       <div className="progress-bar-track small">
                         <div
                           className="progress-bar-fill"
@@ -1151,7 +1226,15 @@ function App() {
               {generatingPreview ? (
                 <div className="preview-modal-loading">
                   <div className="spinner" />
-                  <span>Generating preview…</span>
+                  <span>
+                    Generating preview… {previewProgress > 0 ? `${Math.round(previewProgress)}%` : ""}
+                  </span>
+                  <div className="progress-bar-track small">
+                    <div
+                      className="progress-bar-fill"
+                      style={{ width: `${Math.max(previewProgress, 2)}%` }}
+                    />
+                  </div>
                 </div>
               ) : previewVideoSrc ? (
                 <video
