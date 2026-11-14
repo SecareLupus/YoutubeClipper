@@ -422,7 +422,7 @@ body {
 /* ── Timeline panel (footer) ────────────────────────────────────────────── */
 
 .timeline-panel {
-  min-height: 110px;
+  min-height: 140px;
   border-top: 1px solid var(--border);
   background: var(--bg-secondary);
   flex-shrink: 0;
@@ -454,13 +454,14 @@ body {
 
 .timeline-readout {
   display: flex;
+  align-items: center;
   gap: 1.5rem;
   font-size: 0.75rem;
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
 }
 
-.timeline-readout span:last-child {
+.timeline-clip {
   color: var(--accent-green);
 }
 
@@ -747,4 +748,97 @@ body {
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+/* ── Audio lane (split edits) ─────────────────────────────────────────── */
+
+.timeline-audio-lane {
+  position: relative;
+  height: 18px;
+  margin: 1.1rem 1px 0;
+  background: var(--bg-surface);
+  border-radius: 4px;
+  cursor: pointer;
+  touch-action: none;
+  overflow: visible;
+}
+
+.audio-range {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  background: var(--accent-green);
+  opacity: 0.35;
+  border-radius: 3px;
+  pointer-events: none;
+}
+
+.audio-region {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  font-size: 0.55rem;
+  line-height: 18px;
+  text-align: center;
+  overflow: hidden;
+  white-space: nowrap;
+  color: var(--text-primary, #fff);
+  pointer-events: none;
+}
+
+.audio-region.hold {
+  background: repeating-linear-gradient(45deg, rgba(74, 222, 128, 0.35) 0 4px, transparent 4px 8px);
+}
+
+.audio-region.silent {
+  background: repeating-linear-gradient(-45deg, rgba(160, 160, 160, 0.3) 0 4px, transparent 4px 8px);
+}
+
+.audio-handle {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 4px;
+  background: var(--accent-green);
+  border-radius: 2px;
+  transform: translateX(-50%);
+  cursor: col-resize;
+  z-index: 3;
+}
+
+.audio-relink {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 0 4px;
+  font-size: 0.7rem;
+  line-height: 1.1;
+  z-index: 5;
+  background: var(--bg-secondary);
+  color: var(--accent-green);
+  border: 1px solid var(--accent-green);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.timeline-extend {
+  font-size: 0.65rem;
+  padding: 0 6px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.timeline-extend:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.timeline-declick {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  cursor: pointer;
 }

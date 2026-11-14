@@ -1,6 +1,6 @@
 [package]
 name = "better-clipper"
-version = "0.2.3"
+version = "0.2.7"
 description = "Video Snippet Clipper"
 authors = ["you"]
 edition = "2021"

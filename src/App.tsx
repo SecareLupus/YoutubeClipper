@@ -58,6 +58,8 @@ interface EditSource {
   video_origin: number;
   audio_origin: number;
   frame_dur: number;
+  /** Requested [start, end] seconds of a section download; null for the full video. */
+  section: [number, number] | null;
 }
 
 interface PreviewResult {
@@ -187,6 +189,8 @@ function App() {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [generatingPreview, setGeneratingPreview] = useState(false);
   const previewVideoRef = useRef<HTMLVideoElement>(null);
+  const previewOpenRef = useRef(false);
+  previewOpenRef.current = previewOpen;
 
   // ── video / timeline state ──────────────────────────────────────────────
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -197,6 +201,19 @@ function App() {
   const [currentTime, setCurrentTime] = useState(0); // seconds
   const [inMarker, setInMarker] = useState(0); // seconds (video-local)
   const [outMarker, setOutMarker] = useState(0); // seconds (video-local)
+  // Split edits: audio In/Out follow the video markers while linked.
+  const [audioInRaw, setAudioInRaw] = useState(0);
+  const [audioOutRaw, setAudioOutRaw] = useState(0);
+  const [linkIn, setLinkIn] = useState(true);
+  const [linkOut, setLinkOut] = useState(true);
+  const audioIn = linkIn ? inMarker : audioInRaw;
+  const audioOut = linkOut ? outMarker : audioOutRaw;
+  const [declick, setDeclick] = useState(
+    () => localStorage.getItem("declick") !== "0",
+  );
+  useEffect(() => localStorage.setItem("declick", declick ? "1" : "0"), [declick]);
+  const audioDragRef = useRef<"ain" | "aout" | null>(null);
+  const pendingSeekRef = useRef<number | null>(null);
   const [zoomMin, setZoomMin] = useState(0); // seconds
   const [zoomMax, setZoomMax] = useState(30); // seconds
   const [timelineWidth, setTimelineWidth] = useState(0); // px — measured after mount
@@ -204,6 +221,10 @@ function App() {
   // Refs for keyboard handler (avoids stale closures)
   const inMarkerRef = useRef(inMarker);
   const outMarkerRef = useRef(outMarker);
+  const audioInRef = useRef(audioIn);
+  const audioOutRef = useRef(audioOut);
+  audioInRef.current = audioIn;
+  audioOutRef.current = audioOut;
   const durationRef = useRef(duration);
   const frameDurRef = useRef(1 / 30);
   useEffect(() => { inMarkerRef.current = inMarker; }, [inMarker]);
@@ -292,6 +313,10 @@ function App() {
           pendingFullOutRef.current = false;
           setOutMarker(d);
         }
+        if (pendingSeekRef.current !== null) {
+          video.currentTime = Math.min(d, Math.max(0, pendingSeekRef.current));
+          pendingSeekRef.current = null;
+        }
       }
     };
 
@@ -337,6 +362,22 @@ function App() {
   // ── keyboard shortcuts ───────────────────────────────────────────────────
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // While the preview modal is open, keys belong to it: space toggles the
+      // preview, Escape closes it, editor shortcuts are disabled.
+      if (previewOpenRef.current) {
+        const pv = previewVideoRef.current;
+        if (e.key === " ") {
+          e.preventDefault();
+          if (pv) {
+            if (pv.paused) pv.play().catch(() => {});
+            else pv.pause();
+          }
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          closePreviewRef.current();
+        }
+        return;
+      }
       const video = videoRef.current;
       if (!video || !hasVideo) return;
       // Don't capture when typing in inputs
@@ -361,6 +402,8 @@ function App() {
           0,
           inMarkerRef.current,
           outMarkerRef.current,
+          audioInRef.current,
+          audioOutRef.current,
           durationRef.current,
         ].filter((k) => Number.isFinite(k));
         return [...new Set(pts)].sort((a, b) => a - b);
@@ -411,12 +454,22 @@ function App() {
         case "i":
         case "I":
           e.preventDefault();
-          setInMarker(video.currentTime);
+          if (e.shiftKey) {
+            setAudioInRaw(video.currentTime);
+            setLinkIn(false);
+          } else {
+            setInMarker(video.currentTime);
+          }
           break;
         case "o":
         case "O":
           e.preventDefault();
-          setOutMarker(video.currentTime);
+          if (e.shiftKey) {
+            setAudioOutRaw(video.currentTime);
+            setLinkOut(false);
+          } else {
+            setOutMarker(video.currentTime);
+          }
           break;
       }
     };
@@ -426,22 +479,9 @@ function App() {
   }, [hasVideo]);
 
   // ── preview clip: cut section with ffmpeg, play in modal ───────────────
-  // The preview is played from an in-memory blob, not streamed over HTTP:
-  // WebKitGTK's HTTP media path stalls ffmpeg/x264-encoded files ~0.1s into
-  // playback ("waiting" forever with the whole file buffered), which looked
-  // like the preview pausing itself. Blob playback doesn't stall, but
-  // occasionally fails to open (MEDIA_ERR_SRC_NOT_SUPPORTED); a fresh object
-  // URL for the same blob fixes that, so retry a few times.
-  const previewBlobRef = useRef<Blob | null>(null);
-  const previewRetriesRef = useRef(0);
-
-  const setPreviewBlobUrl = (blob: Blob | null) => {
-    setPreviewVideoSrc((old) => {
-      if (old?.startsWith("blob:")) URL.revokeObjectURL(old);
-      return blob ? URL.createObjectURL(blob) : null;
-    });
-  };
-
+  // Played over the local HTTP server like the editor. (Blob URLs feed
+  // WebKitGTK's pipeline corrupted data; the old HTTP stall was the encode's
+  // zero average bitrate, fixed in media::cut.)
   const handlePreviewClip = async () => {
     if (!edit || generatingPreview) return;
     setGeneratingPreview(true);
@@ -454,14 +494,12 @@ function App() {
         edit,
         inSec: inMarker,
         outSec: outMarker,
+        audioInSec: audioIn,
+        audioOutSec: audioOut,
+        declick,
       })) as PreviewResult;
       console.log("[preview] preview_clip", p);
-      const resp = await fetch(p.url);
-      if (!resp.ok) throw new Error(`HTTP ${resp.status} loading preview`);
-      const blob = await resp.blob();
-      previewBlobRef.current = blob;
-      previewRetriesRef.current = 0;
-      setPreviewBlobUrl(blob);
+      setPreviewVideoSrc(p.url);
       setStatusMsg(
         `Preview ready: ${p.frames} frames (${formatTimeSec(p.start)}–${formatTimeSec(p.end)})`,
       );
@@ -473,58 +511,24 @@ function App() {
     }
   };
 
+  const closePreviewRef = useRef<() => void>(() => {});
   const closePreview = useCallback(() => {
     setPreviewOpen(false);
-    previewBlobRef.current = null;
-    setPreviewVideoSrc((old) => {
-      if (old?.startsWith("blob:")) URL.revokeObjectURL(old);
-      return null;
-    });
+    setPreviewVideoSrc(null);
   }, []);
+  closePreviewRef.current = closePreview;
 
   // ── autoplay preview once it can play through ──────────────────────────
-  // Either it plays from the start, or it is left paused at the start for
-  // the user to press play — never left frozen in a "playing" state.
   useEffect(() => {
     const vid = previewVideoRef.current;
     if (!vid || !previewVideoSrc) return;
-
-    let stallTimer: number | undefined;
     const play = () => {
       vid.play().catch(() => {
         /* autoplay refused: stay paused with controls for the user */
       });
     };
-    const onWaiting = () => {
-      window.clearTimeout(stallTimer);
-      stallTimer = window.setTimeout(() => {
-        if (vid.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) {
-          vid.pause();
-          vid.currentTime = 0;
-        }
-      }, 1500);
-    };
-    const onPlaying = () => window.clearTimeout(stallTimer);
-    const onError = () => {
-      const blob = previewBlobRef.current;
-      if (blob && previewRetriesRef.current < 3) {
-        previewRetriesRef.current += 1;
-        console.warn("[preview] media error, retrying", vid.error?.code);
-        setPreviewBlobUrl(blob); // new object URL -> new element (keyed by src)
-      }
-    };
-
     vid.addEventListener("canplaythrough", play, { once: true });
-    vid.addEventListener("waiting", onWaiting);
-    vid.addEventListener("playing", onPlaying);
-    vid.addEventListener("error", onError);
-    return () => {
-      window.clearTimeout(stallTimer);
-      vid.removeEventListener("canplaythrough", play);
-      vid.removeEventListener("waiting", onWaiting);
-      vid.removeEventListener("playing", onPlaying);
-      vid.removeEventListener("error", onError);
-    };
+    return () => vid.removeEventListener("canplaythrough", play);
   }, [previewVideoSrc]);
 
   // ── process video ───────────────────────────────────────────────────────
@@ -603,6 +607,8 @@ function App() {
   const openEdit = async (src: EditSource, inSec: number, outSec: number) => {
     setInMarker(Math.max(0, inSec));
     setOutMarker(Math.max(0, outSec));
+    setLinkIn(true);
+    setLinkOut(true);
     setEdit(src);
     const videoUrl = (await invoke("serve_video", { path: src.path })) as string;
     console.log("[video] serve_video URL", videoUrl);
@@ -656,6 +662,38 @@ function App() {
     }
   };
 
+  // ── widen the editing section, keeping markers on the same absolute time ──
+  const handleExtend = async (side: "start" | "end") => {
+    if (!result || !edit || downloadingSection) return;
+    setDownloadingSection(true);
+    setProgress(0);
+    setStage("download");
+    setStatusMsg(`Extending section ${side === "start" ? "start" : "end"} by 10s...`);
+    try {
+      const src = (await invoke("extend_section", {
+        videoId: result.video_id,
+        url: result.url,
+        edit,
+        side,
+      })) as EditSource;
+      // Local times are relative to the file's first frame; rebase them.
+      const shift = edit.video_origin - src.video_origin;
+      setInMarker((t) => t + shift);
+      setOutMarker((t) => t + shift);
+      setAudioInRaw((t) => t + shift);
+      setAudioOutRaw((t) => t + shift);
+      pendingSeekRef.current = (videoRef.current?.currentTime ?? 0) + shift;
+      setEdit(src);
+      setDuration(0);
+      setVideoSrc((await invoke("serve_video", { path: src.path })) as string);
+      setStatusMsg(`Section now ${formatTimeSec(src.section![0])} – ${formatTimeSec(src.section![1])}`);
+    } catch (e) {
+      setStatusMsg(`${e}`);
+    } finally {
+      setDownloadingSection(false);
+    }
+  };
+
   const handleSegmentClick = async (idx: number) => {
     const seg = segments[idx];
     await openSection(seg.start_ms, seg.end_ms);
@@ -671,8 +709,8 @@ function App() {
       .replace(/[<>:"/\\|?*]/g, "") // strip invalid filename chars
       .trim()
       .slice(0, 80);
-    const absIn = (edit.video_origin + inMarker) * 1000;
-    const absOut = (edit.video_origin + outMarker) * 1000;
+    const absIn = (edit.video_origin + Math.min(inMarker, audioIn)) * 1000;
+    const absOut = (edit.video_origin + Math.max(outMarker, audioOut)) * 1000;
     const suggestedName = `${title} ${formatTime(absIn)}-${formatTime(absOut)}`
       .replace(/:/g, ".")
       .replace(/\s+/g, " ");
@@ -696,6 +734,9 @@ function App() {
         edit,
         inSec: inMarker,
         outSec: outMarker,
+        audioInSec: audioIn,
+        audioOutSec: audioOut,
+        declick,
         resolution: quality,
         outputPath: outPath,
       })) as string;
@@ -808,6 +849,45 @@ function App() {
     draggingRef.current = null;
   }, []);
 
+  // ── audio lane: A-In / A-Out handles (dragging unlinks that side) ───────
+  const handleAudioPointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      const r = e.currentTarget.getBoundingClientRect();
+      const px = e.clientX - r.left;
+      const handleSize = 10;
+      const inDist = Math.abs(px - timeToPx(audioIn));
+      const outDist = Math.abs(px - timeToPx(audioOut));
+      if (Math.min(inDist, outDist) < handleSize) {
+        audioDragRef.current = inDist <= outDist ? "ain" : "aout";
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } else if (videoRef.current) {
+        videoRef.current.currentTime = Math.max(0, Math.min(duration, pxToTime(px)));
+      }
+    },
+    [audioIn, audioOut, timeToPx, pxToTime, duration],
+  );
+
+  const handleAudioPointerMove = useCallback(
+    (e: React.PointerEvent) => {
+      const drag = audioDragRef.current;
+      if (!drag) return;
+      const r = e.currentTarget.getBoundingClientRect();
+      const t = pxToTime(e.clientX - r.left);
+      if (drag === "ain") {
+        setAudioInRaw(Math.max(0, Math.min(audioOut - 0.1, t)));
+        setLinkIn(false);
+      } else {
+        setAudioOutRaw(Math.max(audioIn + 0.1, Math.min(duration, t)));
+        setLinkOut(false);
+      }
+    },
+    [audioIn, audioOut, duration, pxToTime],
+  );
+
+  const handleAudioPointerUp = useCallback(() => {
+    audioDragRef.current = null;
+  }, []);
+
   // ── search matches (debounced, min 3 chars, limited) ────────────────────
   const MAX_VISIBLE = 50;
 
@@ -876,6 +956,8 @@ function App() {
     const segLeft = timeToPx(inMarker, w);
     const segRight = timeToPx(outMarker, w);
     const playheadPx = timeToPx(currentTime, w);
+    const aLeft = timeToPx(audioIn, w);
+    const aRight = timeToPx(audioOut, w);
 
     // Overview bar: zoom window position relative to full duration
     const overviewZoomLeft = duration > 0 ? (zoomMin / duration) * 100 : 0;
@@ -885,10 +967,40 @@ function App() {
       <div className="timeline-container">
         {/* Time readout */}
         <div className="timeline-readout">
+          {edit?.section && (
+            <button
+              className="timeline-extend"
+              onClick={() => handleExtend("start")}
+              disabled={downloadingSection || edit.section[0] === 0}
+              title="Download 10s more before this section"
+            >
+              ⟵ +10s
+            </button>
+          )}
           <span>In: {formatTimeSec(inMarker)}</span>
           <span>Out: {formatTimeSec(outMarker)}</span>
-          <span>Clip: {formatTimeSec(outMarker - inMarker)}</span>
-          <span className="timeline-shortcuts">space , . ← → ctrl+←→  I/O</span>
+          <span>
+            Video {(outMarker - inMarker).toFixed(2)}s · Audio {(audioOut - audioIn).toFixed(2)}s
+          </span>
+          <label className="timeline-declick" title="20ms fade at the audio edges to avoid clicks">
+            <input type="checkbox" checked={declick} onChange={(e) => setDeclick(e.target.checked)} />
+            Fade audio edges
+          </label>
+          <span className="timeline-shortcuts">space , . ← → ctrl+←→  I/O  shift+I/O audio</span>
+          <span className="timeline-clip">Clip: {(Math.max(outMarker, audioOut) - Math.min(inMarker, audioIn)).toFixed(2)}s</span>
+          {edit?.section && (
+            <button
+              className="timeline-extend"
+              onClick={() => handleExtend("end")}
+              disabled={
+                downloadingSection ||
+                (!!result?.duration && edit.section[1] >= result.duration)
+              }
+              title="Download 10s more after this section"
+            >
+              +10s ⟶
+            </button>
+          )}
         </div>
 
         {/* Main zoom bar */}
@@ -948,6 +1060,59 @@ function App() {
 
           {/* Tick marks */}
           {renderTicks(range, zoomMin, w)}
+        </div>
+
+        {/* Audio lane */}
+        <div
+          className="timeline-audio-lane"
+          onPointerDown={handleAudioPointerDown}
+          onPointerMove={handleAudioPointerMove}
+          onPointerUp={handleAudioPointerUp}
+          onPointerCancel={handleAudioPointerUp}
+          title="Audio — drag the green handles (or shift+I / shift+O) to split from the video"
+        >
+          <div className="audio-range" style={{ left: aLeft, width: aRight - aLeft }} />
+          {/* Audio without video: the edge frame is held */}
+          {audioIn < inMarker && (
+            <div className="audio-region hold" style={{ left: aLeft, width: segLeft - aLeft }}>hold</div>
+          )}
+          {audioOut > outMarker && (
+            <div className="audio-region hold" style={{ left: segRight, width: aRight - segRight }}>hold</div>
+          )}
+          {/* Video without audio: silent */}
+          {audioIn > inMarker && (
+            <div className="audio-region silent" style={{ left: segLeft, width: aLeft - segLeft }}>silent</div>
+          )}
+          {audioOut < outMarker && (
+            <div className="audio-region silent" style={{ left: aRight, width: segRight - aRight }}>silent</div>
+          )}
+          <div className="audio-handle" style={{ left: aLeft }} />
+          <div className="audio-handle" style={{ left: aRight }} />
+          {!linkIn && (
+            <button
+              className="audio-relink"
+              style={{ left: aLeft - 22 }}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={() => setLinkIn(true)}
+              title="Relink audio In to video In"
+            >
+              ⟲
+            </button>
+          )}
+          {!linkOut && (
+            <button
+              className="audio-relink"
+              style={{ left: aRight + 6 }}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={() => setLinkOut(true)}
+              title="Relink audio Out to video Out"
+            >
+              ⟲
+            </button>
+          )}
+          {playheadPx >= 0 && playheadPx <= w && (
+            <div className="timeline-playhead" style={{ left: playheadPx }} />
+          )}
         </div>
 
         {/* Overview bar */}

@@ -50,6 +50,8 @@ pub struct ExportProgress {
 const SECTION_PAD_SECS: f64 = 10.0;
 /// Seconds of slack around the clip when downloading at export quality.
 const EXPORT_PAD_SECS: f64 = 3.0;
+/// How much "Extend section" adds to one side of the editing section.
+const EXTEND_SECS: u64 = 10;
 
 fn cache_subdir(app: &tauri::AppHandle, name: &str) -> Result<std::path::PathBuf, String> {
     let dir = app.path().app_cache_dir().map_err(|e| e.to_string())?.join(name);
@@ -477,26 +479,56 @@ async fn download_section(
     start_ms: u64,
     end_ms: u64,
 ) -> Result<EditSource, String> {
-    let videos_dir = cache_subdir(&app, "videos")?;
     // Whole-second section bounds (yt-dlp starts the video at the first frame
     // at or after this point; see media.rs).
     let start_sec = (start_ms as f64 / 1000.0 - SECTION_PAD_SECS).max(0.0).floor() as u64;
     let end_sec = (end_ms as f64 / 1000.0 + SECTION_PAD_SECS).ceil() as u64;
+    edit_section(&app, &video_id, &url, start_sec, end_sec).await
+}
 
+/// Widen the current section by EXTEND_SECS at its start or end.
+#[tauri::command]
+async fn extend_section(
+    app: tauri::AppHandle,
+    video_id: String,
+    url: String,
+    edit: EditSource,
+    side: String,
+) -> Result<EditSource, String> {
+    let (start, end) = edit.section.ok_or("The full video is already loaded")?;
+    let (start, end) = match side.as_str() {
+        "start" if start == 0 => return Err("Already at the start of the video".into()),
+        "start" => (start.saturating_sub(EXTEND_SECS), end),
+        "end" => (start, end + EXTEND_SECS),
+        _ => return Err(format!("Unknown side: {side}")),
+    };
+    edit_section(&app, &video_id, &url, start, end).await
+}
+
+async fn edit_section(
+    app: &tauri::AppHandle,
+    video_id: &str,
+    url: &str,
+    start_sec: u64,
+    end_sec: u64,
+) -> Result<EditSource, String> {
+    let videos_dir = cache_subdir(app, "videos")?;
     let path = Downloader::fetch_section(
-        &app,
+        app,
         &videos_dir.to_string_lossy(),
-        &video_id,
-        &url,
+        video_id,
+        url,
         start_sec,
         end_sec,
         EDIT_RESOLUTION,
-        download_progress(&app),
+        download_progress(app),
     )
     .await
     .map_err(|e| format!("Section download failed: {e}"))?;
 
-    section_source(&app, path, start_sec as f64).await
+    let mut src = section_source(app, path, start_sec as f64).await?;
+    src.section = Some((start_sec, end_sec));
+    Ok(src)
 }
 
 /// Download the whole video (720p) for manual trimming.
@@ -536,6 +568,7 @@ async fn section_source(app: &tauri::AppHandle, path: String, requested_start: f
         audio_origin: requested_start,
         frame_dur,
         path,
+        section: None,
     })
 }
 
@@ -547,17 +580,25 @@ async fn preview_clip(
     edit: EditSource,
     in_sec: f64,
     out_sec: f64,
+    audio_in_sec: f64,
+    audio_out_sec: f64,
+    declick: bool,
 ) -> Result<serde_json::Value, String> {
     let ffmpeg = sidecar::resolve_sidecar(&app, "ffmpeg");
-    let range = media::clip_range(&ffmpeg, &edit, in_sec, out_sec).await?;
+    let range = media::clip_range(&ffmpeg, &edit, in_sec, out_sec, audio_in_sec, audio_out_sec).await?;
 
-    // Cache by exact absolute frame range.
+    // Cache by exact absolute frame ranges and options.
+    let ms = |t: f64| (t * 1000.0).round() as u64;
     let stem = edit.path.strip_suffix(".mp4").unwrap_or(&edit.path);
     let preview_path = format!(
-        "{}_preview_{}_{}.mp4",
+        // "prev2": earlier previews lack the remux (stall in WebKit); don't reuse them.
+        "{}_prev2_{}_{}_a{}_{}{}.mp4",
         stem,
-        (range.start * 1000.0).round() as u64,
-        (range.end * 1000.0).round() as u64
+        ms(range.start),
+        ms(range.end),
+        ms(range.audio_start),
+        ms(range.audio_end),
+        if declick { "_dc" } else { "" }
     );
 
     if !std::path::Path::new(&preview_path).exists() {
@@ -567,6 +608,7 @@ async fn preview_clip(
             range,
             &preview_path,
             media::EncodeOpts { preset: "ultrafast", crf: "23", audio_bitrate: "128k" },
+            declick,
             {
                 let app = app.clone();
                 move |pct| {
@@ -581,7 +623,7 @@ async fn preview_clip(
         "url": server::register(&preview_path)?,
         "start": range.start,
         "end": range.end,
-        "frames": ((range.end - range.start) / edit.frame_dur).round() as u64,
+        "frames": range.layout(edit.frame_dur).frames,
     }))
 }
 
@@ -595,11 +637,14 @@ async fn export_clip(
     edit: EditSource,
     in_sec: f64,
     out_sec: f64,
+    audio_in_sec: f64,
+    audio_out_sec: f64,
+    declick: bool,
     resolution: String,
     output_path: String,
 ) -> Result<String, String> {
     let ffmpeg = sidecar::resolve_sidecar(&app, "ffmpeg");
-    let range = media::clip_range(&ffmpeg, &edit, in_sec, out_sec).await?;
+    let range = media::clip_range(&ffmpeg, &edit, in_sec, out_sec, audio_in_sec, audio_out_sec).await?;
 
     let emit = {
         let app = app.clone();
@@ -617,8 +662,10 @@ async fn export_clip(
     } else {
         emit(0.0, "downloading");
         let videos_dir = cache_subdir(&app, "videos")?;
-        let start_sec = (range.start - EXPORT_PAD_SECS).max(0.0).floor() as u64;
-        let end_sec = (range.end + EXPORT_PAD_SECS).ceil() as u64;
+        // Cover audio as well as video (split edits extend past the video).
+        let (u_start, u_end) = range.union();
+        let start_sec = (u_start - EXPORT_PAD_SECS).max(0.0).floor() as u64;
+        let end_sec = (u_end + EXPORT_PAD_SECS).ceil() as u64;
         let path = Downloader::fetch_section(
             &app,
             &videos_dir.to_string_lossy(),
@@ -648,6 +695,7 @@ async fn export_clip(
         range,
         &output_path,
         media::EncodeOpts { preset: "medium", crf: "18", audio_bitrate: "192k" },
+        declick,
         {
             let emit = emit.clone();
             move |pct| emit(enc_base + pct * enc_span / 100.0, "encoding")
@@ -720,6 +768,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             process_video,
             transcribe_video,
+            extend_section,
             read_transcript,
             download_section,
             load_full_video,
