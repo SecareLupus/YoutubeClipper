@@ -229,22 +229,41 @@ fn push_segment(segments: &mut Vec<TranscriptSegment>, start: u64, end: u64, tex
 }
 
 fn parse_vtt(content: &str) -> Result<Vec<TranscriptSegment>, String> {
+    // YouTube's rolling auto-captions show two lines per cue: the previous
+    // cue's last line, then the new one. Drop that repeated top line. A
+    // single-line cue matching the previous one is real speech said twice.
+    fn flush(segs: &mut Vec<TranscriptSegment>, start: u64, end: u64, text: &mut Vec<String>, cue_prev: &str) {
+        if text.len() > 1 && text[0] == cue_prev {
+            text.remove(0);
+        }
+        if !text.is_empty() {
+            push_segment(segs, start, end, text.join(" "));
+        }
+        text.clear();
+    }
+
     let mut segments: Vec<TranscriptSegment> = Vec::new();
     let mut current_start: u64 = 0;
     let mut current_end: u64 = 0;
     let mut current_text: Vec<String> = Vec::new();
     let mut in_cue = false;
+    // Last text line seen (pushed or not), and its value when this cue began.
+    let mut prev_line = String::new();
+    let mut cue_prev = String::new();
 
-    for line in content.lines() {
-        let line = line.trim();
-
-        // Empty line ends the current cue
-        if line.is_empty() {
-            if in_cue && !current_text.is_empty() {
-                push_segment(&mut segments, current_start, current_end, current_text.join(" "));
-                current_text.clear();
+    for raw in content.lines() {
+        // Only a truly empty line ends a cue. YouTube auto-captions use a " "
+        // line for a blank caption row; treating it as the end of the cue
+        // dropped the cue's real text (e.g. every cue of b-U1Av2vsu8).
+        if raw.is_empty() {
+            if in_cue {
+                flush(&mut segments, current_start, current_end, &mut current_text, &cue_prev);
             }
             in_cue = false;
+            continue;
+        }
+        let line = raw.trim();
+        if line.is_empty() {
             continue;
         }
 
@@ -260,24 +279,25 @@ fn parse_vtt(content: &str) -> Result<Vec<TranscriptSegment>, String> {
         // Timestamp line
         if line.contains("-->") {
             if let Some((start, end)) = parse_timestamp_line(line) {
-                if in_cue && !current_text.is_empty() {
-                    push_segment(&mut segments, current_start, current_end, current_text.join(" "));
-                    current_text.clear();
+                if in_cue {
+                    flush(&mut segments, current_start, current_end, &mut current_text, &cue_prev);
                 }
                 current_start = start;
                 current_end = end;
                 in_cue = true;
+                cue_prev = prev_line.clone();
             }
         } else if in_cue {
             let cleaned = strip_tags(line);
             if !cleaned.is_empty() {
+                prev_line = cleaned.clone();
                 current_text.push(cleaned);
             }
         }
     }
 
-    if in_cue && !current_text.is_empty() {
-        push_segment(&mut segments, current_start, current_end, current_text.join(" "));
+    if in_cue {
+        flush(&mut segments, current_start, current_end, &mut current_text, &cue_prev);
     }
 
     Ok(segments)
@@ -778,4 +798,45 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running BetterClipper");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// YouTube auto-captions where every cue opens with a " " line
+    /// (b-U1Av2vsu8). Used to parse to 0 segments.
+    #[test]
+    fn parse_vtt_keeps_text_after_blank_space_line() {
+        let vtt = "WEBVTT\nKind: captions\nLanguage: en\n\n\
+00:00:05.759 --> 00:00:08.709 align:start position:0%\n \nlook<00:00:05.920><c> at</c><00:00:06.080><c> that</c><00:00:06.319><c> wet</c>\n\n\
+00:00:08.709 --> 00:00:08.719 align:start position:0%\n \n \n\n\
+00:00:08.719 --> 00:00:18.810 align:start position:0%\n \nnose<00:00:09.800><c> a</c><00:00:10.800><c> look</c><00:00:11.040><c> at</c><00:00:11.360><c> you</c>\n\n\
+00:00:18.810 --> 00:00:18.820 align:start position:0%\n \n \n\n\
+00:00:18.820 --> 00:00:22.100 align:start position:0%\n \n[Music]\n";
+        let segs = parse_vtt(vtt).unwrap();
+        let texts: Vec<&str> = segs.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, ["look at that wet", "nose a look at you", "[Music]"]);
+        assert_eq!((segs[0].start_ms, segs[0].end_ms), (5759, 8709));
+    }
+
+    /// Rolling auto-captions: each cue repeats the previous line on top.
+    #[test]
+    fn parse_vtt_drops_rolling_repeat_line() {
+        let vtt = "WEBVTT\n\n\
+00:00:01.000 --> 00:00:03.000\n \nlook<00:00:01.500><c> down.</c>\n\n\
+00:00:03.000 --> 00:00:03.010\nlook down.\n \n\n\
+00:00:03.010 --> 00:00:06.000\nlook down.\nDirectly<00:00:04.000><c> beneath</c>\n";
+        let texts: Vec<String> = parse_vtt(vtt).unwrap().into_iter().map(|s| s.text).collect();
+        assert_eq!(texts, ["look down.", "Directly beneath"]);
+    }
+
+    /// Manual captions where the same line is spoken twice, in separate cues.
+    #[test]
+    fn parse_vtt_keeps_line_spoken_twice() {
+        let vtt = "WEBVTT\n\n00:11:12.801 --> 00:11:13.636\nI'm losing it.\n\n\
+00:11:14.837 --> 00:11:15.604\nI'm losing it.\n";
+        let texts: Vec<String> = parse_vtt(vtt).unwrap().into_iter().map(|s| s.text).collect();
+        assert_eq!(texts, ["I'm losing it.", "I'm losing it."]);
+    }
 }
